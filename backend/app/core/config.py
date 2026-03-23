@@ -1,7 +1,7 @@
 from pathlib import Path
 
 
-BACKEND_DIR = Path(r"D:\Thesis\Python\Machine Learning\flood-hazard-app\backend")
+BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
 APP_DIR = BACKEND_DIR / "app"
 
 ASSETS_DIR = BACKEND_DIR / "assets"
