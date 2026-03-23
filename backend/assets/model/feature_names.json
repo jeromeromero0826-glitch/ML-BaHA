@@ -1,0 +1,14 @@
+[
+  "duration",
+  "depth",
+  "antecedent",
+  "intensity",
+  "total_rain",
+  "antecedent_ratio",
+  "x_coordinate",
+  "y_coordinate",
+  "elevation",
+  "slope",
+  "log10_flow_accumulation",
+  "twi"
+]
