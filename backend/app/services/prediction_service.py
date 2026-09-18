@@ -8,15 +8,15 @@ Improvements over original:
 - Separated pure-compute from I/O (save_outputs now decoupled)
 - Scenario registry for history endpoint
 - Cleaner error surface
-- Random Forest v2 support: TWI + log10_flow_accumulation features (12 total)
+- Model v2 support: TWI + log10_flow_accumulation features (12 total)
+- Per-barangay summary computed server-side (was a 23 MB client-side download)
 """
 
 from datetime import datetime
-from functools import lru_cache
 from pathlib import Path
 import json
-import hashlib
 import threading
+import uuid
 
 import numpy as np
 import pandas as pd
@@ -24,6 +24,7 @@ import pandas as pd
 from app.core.config import (
     DEPTH_NODATA,
     DEFAULT_HAZARD_NODATA,
+    MAX_RETAINED_SCENARIOS,
     OUTPUT_RASTERS_DIR,
     OUTPUT_CSV_DIR,
     OUTPUT_LOGS_DIR,
@@ -41,6 +42,7 @@ from app.services.geotiff_writer import (
     save_geotiff,
 )
 from app.services.map_renderer import render_hazard_png
+from app.services.barangay_summary import build_barangay_summary, build_area_totals
 
 # ---------------------------------------------------------------------------
 # In-memory scenario registry  (thread-safe append-only list)
@@ -50,14 +52,41 @@ _registry_lock = threading.Lock()
 
 
 def get_scenario_history() -> list[dict]:
-    """Return a copy of all completed scenario summaries (newest first)."""
+    """Return a copy of all retained scenario summaries (newest first)."""
     with _registry_lock:
         return list(reversed(_scenario_registry))
 
 
+def _scenario_files(entry: dict) -> list[Path]:
+    """Map a scenario's public output URLs back to their paths on disk."""
+    paths = []
+    for url in (entry.get("outputs") or {}).values():
+        if isinstance(url, str) and url.startswith("/outputs/"):
+            paths.append(OUTPUTS_DIR / url[len("/outputs/"):])
+    return paths
+
+
 def _register_scenario(entry: dict) -> None:
+    """
+    Record a scenario and retire the oldest ones past the retention cap.
+
+    Output files used to be wiped wholesale at the start of every prediction while
+    the history endpoint went on advertising the deleted ones, so loading any
+    scenario but the newest gave a 404 map and dead download links. Deletion is now
+    tied to eviction from the registry: whatever history lists, you can still open.
+    """
+    evicted = []
     with _registry_lock:
         _scenario_registry.append(entry)
+        while len(_scenario_registry) > MAX_RETAINED_SCENARIOS:
+            evicted.append(_scenario_registry.pop(0))
+
+    for old in evicted:
+        for path in _scenario_files(old):
+            try:
+                path.unlink()
+            except OSError:
+                pass  # already gone, or held open by a download in flight
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +136,7 @@ def build_feature_dataframe(
     data["elevation"]    = grid_df["elevation"].to_numpy(dtype=np.float32)
     data["slope"]        = grid_df["slope"].to_numpy(dtype=np.float32)
 
-    # TWI and log10 flow accumulation (added in Random Forest v2)
+    # TWI and log10 flow accumulation (added in model v2)
     if "log10_flow_accumulation" in grid_df.columns:
         data["log10_flow_accumulation"] = grid_df["log10_flow_accumulation"].to_numpy(dtype=np.float32)
     elif "log10_flow_accumulation" in feature_names:
@@ -180,26 +209,40 @@ def ensure_output_dirs() -> None:
         d.mkdir(parents=True, exist_ok=True)
 
 
-def _cleanup_old_outputs() -> None:
-    """Delete all previous prediction output files, keeping only the latest."""
-    patterns = [
+def purge_output_dirs() -> int:
+    """
+    Clear every output file. Called once at startup, when the in-memory registry
+    is empty and therefore nothing can reference what is left over from a previous
+    process. Keeps disk from growing across restarts on a small instance.
+    """
+    ensure_output_dirs()
+    removed = 0
+    for folder, pattern in (
         (OUTPUT_RASTERS_DIR, "*.tif"),
         (OUTPUT_CSV_DIR,     "*.csv"),
         (OUTPUT_LOGS_DIR,    "*.json"),
         (OUTPUTS_DIR / "maps", "*.png"),
-    ]
-    for folder, pattern in patterns:
+    ):
         if folder.exists():
             for f in folder.glob(pattern):
                 try:
                     f.unlink()
+                    removed += 1
                 except OSError:
-                    pass  # skip if file is locked
+                    pass
+    return removed
 
 
 def build_scenario_id(duration: float, depth: float, antecedent: float) -> str:
+    """
+    Unique per request. The timestamp alone has one-second resolution, so two
+    predictions with the same inputs arriving together would have written to the
+    same filenames and corrupted each other's outputs. The short suffix keeps
+    concurrent requests on disjoint files.
+    """
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"D{duration:g}_R{depth:g}_A{antecedent:g}_{ts}"
+    token = uuid.uuid4().hex[:4]
+    return f"D{duration:g}_R{depth:g}_A{antecedent:g}_{ts}_{token}"
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +260,6 @@ def save_outputs(
     hazard_config: dict,
 ) -> dict:
     ensure_output_dirs()
-    _cleanup_old_outputs()   # delete previous prediction files before saving new ones
 
     depth_raster_path  = OUTPUT_RASTERS_DIR / f"{scenario_id}_depth.tif"
     hazard_raster_path = OUTPUT_RASTERS_DIR / f"{scenario_id}_hazard.tif"
@@ -271,6 +313,7 @@ def run_prediction(duration: float, depth: float, antecedent: float, assets: dic
     hazard_config = assets["hazard_config"]
     grid_df       = assets["grid_df"]
     grid_metadata = assets["grid_metadata"]
+    barangay      = assets["barangay"]
 
     # --- Rainfall features (cached for repeated identical inputs) ---
     rainfall    = _get_rainfall_features(duration, depth, antecedent)
@@ -306,6 +349,20 @@ def run_prediction(duration: float, depth: float, antecedent: float, assets: dic
     summary     = build_summary(predicted_depth, predicted_hazard, hazard_config, rainfall)
     scenario_id = build_scenario_id(duration, depth, antecedent)
 
+    # --- Per-barangay aggregation (milliseconds; the index is precomputed) ---
+    barangay_summary = build_barangay_summary(predicted_depth, predicted_hazard, barangay)
+    area_totals      = build_area_totals(predicted_hazard, barangay)
+    summary["area_totals"] = area_totals
+    summary["channel_min_flow_acc_log10"] = barangay.get("channel_threshold")
+    summary["n_channel_cells"] = barangay.get("n_channel_cells", 0)
+
+    # Municipality-wide land-only maximum, so the headline number is not an
+    # in-channel water depth. Channel cells are still in every count above.
+    land_mask = ~barangay["cell_is_channel"]
+    summary["max_depth_land_m"] = (
+        float(predicted_depth[land_mask].max()) if land_mask.any() else 0.0
+    )
+
     saved = save_outputs(
         scenario_id=scenario_id,
         depth_raster=depth_raster,
@@ -319,18 +376,20 @@ def run_prediction(duration: float, depth: float, antecedent: float, assets: dic
 
     # --- Register in history ---
     _register_scenario({
-        "scenario_id":   scenario_id,
-        "timestamp":     summary["timestamp"],
-        "rainfall":      rainfall,
-        "summary":       summary,
-        "outputs":       saved["outputs"],
-        "map_outputs":   saved["map_outputs"],
+        "scenario_id":      scenario_id,
+        "timestamp":        summary["timestamp"],
+        "rainfall":         rainfall,
+        "summary":          summary,
+        "barangay_summary": barangay_summary,
+        "outputs":          saved["outputs"],
+        "map_outputs":      saved["map_outputs"],
     })
 
     return {
         "rainfall":           rainfall,
         "summary":            summary,
         "hazard_class_counts":summary["hazard_class_counts"],
+        "barangay_summary":   barangay_summary,
         "outputs":            saved["outputs"],
         "map_outputs":        saved["map_outputs"],
     }

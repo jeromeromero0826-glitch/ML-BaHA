@@ -1,13 +1,26 @@
+# Runtime dependencies for the ML-BaHa API.
+#
+# Keep this list to what the server actually imports. Every extra package is
+# downloaded and built on each cold start, and this runs on an instance that
+# sleeps when idle, so unused entries cost real seconds before the first
+# prediction of a session can be served.
+
 fastapi==0.111.0
+pydantic==2.7.1        # request/response schemas import it directly
 uvicorn[standard]==0.29.0
-numpy==1.26.4
-scipy==1.13.0
-rasterio==1.3.10
-scikit-learn==1.4.2
+
+# Model loading and inference
+joblib==1.4.2          # loads the serialised model; imported directly by asset_loader
+scikit-learn==1.4.2    # provides the estimator API the pickle was built against
 xgboost==2.0.3
+
+# Data and raster handling
+numpy==1.26.4
 pandas==2.2.2
-shapely==2.0.4
-pyproj==3.6.1
-Pillow==10.3.0
-python-multipart==0.0.9
-aiofiles==23.2.1
+rasterio==1.3.10       # GeoTIFF read/write; bundles its own PROJ, pyproj not needed
+Pillow==10.3.0         # hazard overlay PNG
+
+# Removed as unused by the server: scipy (pulled in by scikit-learn anyway),
+# shapely and pyproj (no geometry work at runtime since the barangay index is
+# precomputed offline), python-multipart and aiofiles (no file uploads, no async
+# file endpoints).

@@ -63,6 +63,7 @@ def predict_flood_hazard(payload: PredictionRequest, request: Request):
         "input_rainfall":     result["rainfall"],
         "summary":            result["summary"],
         "hazard_class_counts":result["summary"]["hazard_class_counts"],
+        "barangay_summary":   result["barangay_summary"],
         "outputs":            result["outputs"],
         "map_outputs":        result["map_outputs"],
     }

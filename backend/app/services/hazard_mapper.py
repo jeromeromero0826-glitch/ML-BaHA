@@ -24,6 +24,16 @@ def classify_hazard(depth_array, hazard_config):
 
         hazard[mask] = code
 
+    # Safety net. Depths that fall in no class interval (for example a value
+    # sitting exactly on a boundary, or below the lowest class minimum) would
+    # otherwise keep the nodata code and silently vanish from the class counts,
+    # leaving the totals short of the cell count. Any wet cell still unassigned
+    # is folded into the lowest hazard class.
+    lowest = min((c["code"] for c in hazard_config["classes"] if c["code"] != 0), default=1)
+    stranded = (hazard == nodata_value) & (depth_array > 0)
+    if stranded.any():
+        hazard[stranded] = lowest
+
     return hazard
 
 

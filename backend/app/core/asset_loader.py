@@ -9,7 +9,9 @@ Improvements over original:
 """
 
 import json
+
 import joblib
+import numpy as np
 import pandas as pd
 
 from app.core.config import (
@@ -18,9 +20,11 @@ from app.core.config import (
     HAZARD_CONFIG_PATH,
     GRID_TABLE_PATH,
     GRID_METADATA_PATH,
+    BARANGAY_META_PATH,
+    BARANGAY_INDEX_PATH,
 )
 
-# Required grid table columns — updated for Random Forest v2 (TWI + log10_flow_accumulation)
+# Required grid table columns — model v2 feature set (TWI + log10_flow_accumulation)
 _REQUIRED_GRID_COLS = {
     "row", "col",
     "x_coordinate", "y_coordinate",
@@ -93,6 +97,50 @@ def load_grid_metadata() -> dict:
     return meta
 
 
+
+def load_barangay_index(n_active_cells: int) -> dict:
+    """
+    Load the precomputed cell -> barangay assignment.
+
+    Regenerate both files with scripts/build_barangay_index.py whenever the
+    barangay boundaries or the spatial grid change. The per-cell array must stay
+    row-aligned with grid_cells.csv, so its length is checked here rather than
+    failing confusingly during the first prediction.
+    """
+    if not BARANGAY_META_PATH.exists() or not BARANGAY_INDEX_PATH.exists():
+        raise FileNotFoundError(
+            f"Barangay index not found ({BARANGAY_META_PATH.name} / {BARANGAY_INDEX_PATH.name}). "
+            "Run: python scripts/build_barangay_index.py"
+        )
+
+    meta = load_json(BARANGAY_META_PATH)
+    for key in ("barangays", "barangay_total_cells", "sipocot_total_cells"):
+        if key not in meta:
+            raise ValueError(f"barangay_meta.json is missing required key: {key}")
+
+    with np.load(BARANGAY_INDEX_PATH) as npz:
+        cell_barangay = npz["cell_barangay"].astype(np.int16)
+        cell_is_channel = npz["cell_is_channel"].astype(bool)
+
+    if len(cell_barangay) != n_active_cells:
+        raise ValueError(
+            f"barangay_index.npz has {len(cell_barangay):,} entries but grid_cells.csv "
+            f"has {n_active_cells:,} rows. Re-run scripts/build_barangay_index.py."
+        )
+    if len(meta["barangays"]) != len(meta["barangay_total_cells"]):
+        raise ValueError("barangay_meta.json: 'barangays' and 'barangay_total_cells' differ in length.")
+
+    return {
+        "names":                meta["barangays"],
+        "area_cells":           meta["barangay_total_cells"],
+        "sipocot_total_cells":  int(meta["sipocot_total_cells"]),
+        "channel_threshold":    meta.get("channel_min_flow_acc_log10"),
+        "n_channel_cells":      int(meta.get("n_channel_cells", int(cell_is_channel.sum()))),
+        "cell_barangay":        cell_barangay,
+        "cell_is_channel":      cell_is_channel,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Master loader
 # ---------------------------------------------------------------------------
@@ -118,6 +166,9 @@ def load_all_assets(force_reload: bool = False) -> dict:
     print("[asset_loader] Loading grid metadata...")
     grid_metadata = load_grid_metadata()
 
+    print("[asset_loader] Loading barangay index...")
+    barangay = load_barangay_index(len(grid_df))
+
     # Cross-validate: feature count must match what model expects
     try:
         expected_features = model.n_features_in_
@@ -133,7 +184,9 @@ def load_all_assets(force_reload: bool = False) -> dict:
         f"[asset_loader] Assets loaded: "
         f"{len(grid_df):,} grid cells | "
         f"{len(feature_names)} features | "
-        f"{len(hazard_config['classes'])} hazard classes"
+        f"{len(hazard_config['classes'])} hazard classes | "
+        f"{len(barangay['names'])} barangays "
+        f"({barangay['sipocot_total_cells']:,} cells inside Sipocot)"
     )
 
     return {
@@ -142,4 +195,5 @@ def load_all_assets(force_reload: bool = False) -> dict:
         "hazard_config": hazard_config,
         "grid_df":       grid_df,
         "grid_metadata": grid_metadata,
+        "barangay":      barangay,
     }

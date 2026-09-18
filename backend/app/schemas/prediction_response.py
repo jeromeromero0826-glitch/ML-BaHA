@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 class _FlexModel(BaseModel):
@@ -35,6 +35,29 @@ class PredictionSummary(_FlexModel):
     hazard_class_counts: List[HazardClassCount]
 
 
+class AreaTotals(_FlexModel):
+    denominator: int
+    denominator_label: str
+    area_km2: float
+    class_counts: Dict[str, int]
+    class_pcts: Dict[str, float]
+
+
+class BarangayHazard(_FlexModel):
+    name: str
+    area_cells: int
+    area_km2: float
+    active_cells: int
+    counts: Dict[str, int]
+    pcts: Dict[str, float]
+    dominant: int
+    classified_pct: float
+    max_depth_m: float
+    max_depth_land_m: float
+    mean_depth_m: float
+    channel_cells: int
+
+
 class OutputFiles(_FlexModel):
     scenario_id: str
     depth_raster: str
@@ -56,5 +79,6 @@ class PredictionResponse(_FlexModel):
     input_rainfall: RainfallFeatures
     summary: PredictionSummary
     hazard_class_counts: List[HazardClassCount]
+    barangay_summary: List[BarangayHazard] = []
     outputs: OutputFiles
     map_outputs: MapOutputs
