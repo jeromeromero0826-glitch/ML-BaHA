@@ -1,6 +1,6 @@
 {
   "classes": [
-    { "code": 1, "name": "H1", "label": "Low",       "min_depth": 0.01, "max_depth": 0.5,  "color": "#facc15" },
+    { "code": 1, "name": "H1", "label": "Low",       "min_depth": 0.0,  "max_depth": 0.5,  "color": "#facc15" },
     { "code": 2, "name": "H2", "label": "Moderate",  "min_depth": 0.5,  "max_depth": 1.0,  "color": "#f97316" },
     { "code": 3, "name": "H3", "label": "High",      "min_depth": 1.0,  "max_depth": 1.5,  "color": "#ea580c" },
     { "code": 4, "name": "H4", "label": "Very High", "min_depth": 1.5,  "max_depth": 2.0,  "color": "#dc2626" },

@@ -8,49 +8,36 @@ import "./App.css";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
-// ── Point-in-polygon (ray casting) ───────────────────────────────────────────
-function pointInPolygon(x, y, ring) {
-  let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const xi = ring[i][0], yi = ring[i][1];
-    const xj = ring[j][0], yj = ring[j][1];
-    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
-      inside = !inside;
+// The backend sleeps when idle on the free tier and can take 20 to 30 seconds to
+// wake. Every call therefore carries an explicit timeout, and the calls made at
+// startup are retried, so a cold server no longer leaves the map permanently
+// empty or the spinner running forever.
+async function apiFetch(path, opts = {}) {
+  const { timeout = 20000, retries = 0, retryDelay = 1500, ...init } = opts;
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    try {
+      const res = await fetch(`${API_BASE_URL}${path}`, { ...init, signal: controller.signal });
+      clearTimeout(timer);
+      if (!res.ok) {
+        let detail = "";
+        try { detail = (await res.json())?.detail || ""; } catch { /* non-JSON body */ }
+        throw new Error(detail || `Server returned ${res.status} ${res.statusText}`);
+      }
+      return res;
+    } catch (err) {
+      clearTimeout(timer);
+      lastErr = err?.name === "AbortError"
+        ? new Error(`Request timed out after ${Math.round(timeout / 1000)}s`)
+        : err;
+      if (attempt < retries) {
+        await new Promise((r) => setTimeout(r, retryDelay * (attempt + 1)));
+      }
     }
   }
-  return inside;
-}
-
-function pointInFeature(x, y, feature) {
-  const geom = feature.geometry;
-  if (!geom) return false;
-  const polys = geom.type === "Polygon"
-    ? [geom.coordinates]
-    : geom.type === "MultiPolygon"
-    ? geom.coordinates
-    : [];
-  for (const poly of polys) {
-    if (pointInPolygon(x, y, poly[0])) return true;
-  }
-  return false;
-}
-
-// Compute bounding box for a feature (for fast pre-filter)
-function featureBBox(feature) {
-  const geom = feature.geometry;
-  const rings = geom.type === "Polygon"
-    ? [geom.coordinates[0]]
-    : geom.type === "MultiPolygon"
-    ? geom.coordinates.map((p) => p[0])
-    : [];
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (const ring of rings) {
-    for (const [cx, cy] of ring) {
-      if (cx < minX) minX = cx; if (cx > maxX) maxX = cx;
-      if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
-    }
-  }
-  return { minX, maxX, minY, maxY };
+  throw lastErr;
 }
 
 const HAZARD_NAMES = {
@@ -131,11 +118,10 @@ function MapHoverTooltip({ overlayBounds, csvCells }) {
   const map = useMap();
   const [tooltip, setTooltip] = useState(null);
 
+  const active = Boolean(overlayBounds && csvCells?.length);
+
   useEffect(() => {
-    if (!overlayBounds || !csvCells?.length) {
-      setTooltip(null);
-      return;
-    }
+    if (!active) return undefined;
 
     const onMove = (e) => {
       const { lat, lng } = e.latlng;
@@ -158,10 +144,14 @@ function MapHoverTooltip({ overlayBounds, csvCells }) {
     const onOut = () => setTooltip(null);
     map.on("mousemove", onMove);
     map.on("mouseout",  onOut);
-    return () => { map.off("mousemove", onMove); map.off("mouseout", onOut); };
-  }, [map, overlayBounds, csvCells]);
+    return () => {
+      map.off("mousemove", onMove);
+      map.off("mouseout",  onOut);
+      setTooltip(null);
+    };
+  }, [map, active, overlayBounds, csvCells]);
 
-  if (!tooltip) return null;
+  if (!active || !tooltip) return null;
   const name  = HAZARD_NAMES[tooltip.code] ?? "Unknown";
   const color = HAZARD_COLORS[tooltip.code] ?? "#888";
   const depth = tooltip.depth > 0 ? ` · ${tooltip.depth.toFixed(2)} m` : "";
@@ -198,12 +188,16 @@ function ScenarioRow({ s, onLoad }) {
   );
 }
 
-function LoadingOverlay() {
+function LoadingOverlay({ waking }) {
   return (
     <div className="loading-overlay" aria-live="polite">
       <div className="spinner-ring" />
-      <p>Running ML-BaHa prediction…</p>
-      <p className="loading-sub">Computing flood depth for all grid cells</p>
+      <p>{waking ? "Waking the prediction server…" : "Running ML-BaHa prediction…"}</p>
+      <p className="loading-sub">
+        {waking
+          ? "The server sleeps when idle, so the first run after a pause takes 20 to 30 seconds."
+          : "Computing flood depth for all grid cells"}
+      </p>
     </div>
   );
 }
@@ -250,14 +244,13 @@ export default function App() {
   const [barangaySearch,   setBarangaySearch]   = useState("");
   const [selectedBarangay, setSelectedBarangay] = useState(null);
   const [highlightedName,  setHighlightedName]  = useState("");
-  const [barangaySummary,  setBarangaySummary]  = useState([]);   // per-barangay hazard counts
-  const [summaryLoading,   setSummaryLoading]   = useState(false);
   const [summarySearch,    setSummarySearch]    = useState("");
   const [barangayPopup,    setBarangayPopup]    = useState(null); // { name, x, y }
 
   const geojsonRef  = useRef(null);
   const [csvCells, setCsvCells] = useState([]); // lat/lng cells for hover tooltip
-  const [gridTotal, setGridTotal] = useState(0); // total cells for legend %
+  const [waking,    setWaking]    = useState(false); // backend cold start in progress
+  const [bootError, setBootError] = useState("");
 
   const mapOutputs = result?.map_outputs;
   const overlayUrl = mapOutputs?.hazard_png ? `${API_BASE_URL}${mapOutputs.hazard_png}` : null;
@@ -270,18 +263,32 @@ export default function App() {
     summaryJson:   result?.outputs?.summary_json   ? `${API_BASE_URL}${result.outputs.summary_json}`   : null,
   };
 
-  // ── Fetch barangays ──────────────────────────────────────────────────────
+  // ── Startup: wake the backend, then load barangay boundaries ─────────────
   useEffect(() => {
-    // Fetch grid total for legend percentage denominator
-    fetch(`${API_BASE_URL}/api/grid-total`)
-      .then((r) => r.ok ? r.json() : null)
-      .then((d) => { if (d?.total_cells) setGridTotal(d.total_cells); })
-      .catch(() => {});
-    fetch(`${API_BASE_URL}/api/barangays`)
-      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-      .then((geojson) => {
+    let cancelled = false;
+    // Only announce the cold start if it actually is one; a warm server answers
+    // well inside this window and the user never sees the notice.
+    const slowTimer = setTimeout(() => { if (!cancelled) setWaking(true); }, 5000);
+
+    (async () => {
+      try {
+        await apiFetch("/api/health", { timeout: 70000, retries: 2, retryDelay: 3000 });
+      } catch {
+        if (!cancelled) {
+          setBootError(
+            "Could not reach the prediction server. It may still be starting up, so try Run Prediction in a moment."
+          );
+        }
+      }
+      clearTimeout(slowTimer);
+      if (!cancelled) setWaking(false);
+      if (cancelled) return;
+
+      try {
+        const res = await apiFetch("/api/barangays", { timeout: 30000, retries: 2 });
+        const geojson = await res.json();
         const features = geojson.features || [];
-        if (!features.length) return;
+        if (!features.length || cancelled) return;
         const props = features[0]?.properties || {};
         const nameCandidates = ["BRGY_NAME","NAME_3","NAME","Barangay","BARANGAY","brgy_name","name","ADM4_EN"];
         const nameCol = nameCandidates.find((k) => props[k] !== undefined) || Object.keys(props)[0];
@@ -295,185 +302,95 @@ export default function App() {
         setBarangayGeoJSON(normalised);
         const names = normalised.features.map((f) => f.properties.BRGY_NAME).filter((n) => n && n !== "Unknown").sort();
         setBarangayList([...new Set(names)]);
-      })
-      .catch((e) => console.warn("[barangays]", e));
-  }, []);
-
-  // ── Barangay hazard summary ──────────────────────────────────────────────
-  const computeBarangaySummary = useCallback(async (csvUrl, geojson) => {
-    if (!csvUrl || !geojson?.features?.length) return;
-    setSummaryLoading(true);
-    try {
-      // Fetch prediction CSV (active cells with hazard codes)
-      const [predRes, allRes] = await Promise.all([
-        fetch(csvUrl),
-        fetch(`${API_BASE_URL}/api/grid-all-cells`),
-      ]);
-      const predText = await predRes.text();
-      const allText  = await allRes.text();
-
-      // Parse prediction CSV → map of "row_col" → {code, depth}
-      const predLines  = predText.trim().split("\n");
-      const predHdrs   = predLines[0].split(",").map((h) => h.trim());
-      const pRowIdx    = predHdrs.indexOf("row");
-      const pColIdx    = predHdrs.indexOf("col");
-      const pCodeIdx   = predHdrs.indexOf("hazard_code");
-      const pDepthIdx  = predHdrs.indexOf("predicted_depth_m");
-      const predMap    = new Map();
-      for (let i = 1; i < predLines.length; i++) {
-        const cols = predLines[i].split(",");
-        if (cols.length < predHdrs.length) continue;
-        const key = `${cols[pRowIdx]}_${cols[pColIdx]}`;
-        predMap.set(key, {
-          code:  parseInt(cols[pCodeIdx]),
-          depth: pDepthIdx >= 0 ? parseFloat(cols[pDepthIdx]) : 0,
-        });
-      }
-
-      // Parse all-cells CSV → full spatial grid
-      const allLines = allText.trim().split("\n");
-      const allHdrs  = allLines[0].split(",").map((h) => h.trim());
-      const aRowIdx  = allHdrs.indexOf("row");
-      const aColIdx  = allHdrs.indexOf("col");
-      const aXIdx    = allHdrs.indexOf("x_coordinate");
-      const aYIdx    = allHdrs.indexOf("y_coordinate");
-
-      const allCells = [];
-      for (let i = 1; i < allLines.length; i++) {
-        const cols = allLines[i].split(",");
-        if (cols.length < allHdrs.length) continue;
-        const row = cols[aRowIdx], col = cols[aColIdx];
-        const key = `${row}_${col}`;
-        const pred = predMap.get(key);
-        const utmX = parseFloat(cols[aXIdx]);
-        const utmY = parseFloat(cols[aYIdx]);
-        const [lng, lat] = utmToWgs84Ref(utmX, utmY);
-        allCells.push({
-          x:     lng,
-          y:     lat,
-          code:  pred ? pred.code  : 0,  // filtered-out = No Hazard
-          depth: pred ? pred.depth : 0,
-        });
-      }
-
-      // Pre-compute bounding boxes
-      const features = geojson.features;
-      const bboxes   = features.map((f) => featureBBox(f));
-
-      // Assign each cell to a barangay
-      const summary = features.map((f) => ({
-        name:       f.properties?.BRGY_NAME || "Unknown",
-        counts:     { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 },
-        totalCells: 0,
-        maxDepth:   0,
-        depthSum:   0,
-      }));
-
-      for (const cell of allCells) {
-        for (let fi = 0; fi < features.length; fi++) {
-          const bb = bboxes[fi];
-          if (cell.x < bb.minX || cell.x > bb.maxX ||
-              cell.y < bb.minY || cell.y > bb.maxY) continue;
-          if (pointInFeature(cell.x, cell.y, features[fi])) {
-            summary[fi].counts[cell.code]++;
-            summary[fi].totalCells++;
-            summary[fi].depthSum  += cell.depth;
-            if (cell.depth > summary[fi].maxDepth) summary[fi].maxDepth = cell.depth;
-            break;
-          }
+        setBootError("");
+      } catch (err) {
+        if (!cancelled) {
+          setBootError(`Barangay boundaries could not be loaded: ${err.message}`);
         }
       }
+    })();
 
-      // Compute percentages and dominant hazard
-      const result = summary.map((b) => {
-        const total = b.totalCells || 1;
-        const pcts  = {};
-        for (let c = 0; c <= 5; c++) {
-          pcts[c] = b.counts[c] > 0
-            ? ((b.counts[c] / total) * 100).toFixed(1)
-            : "0";
-        }
-        // Dominant = hazard class (1-5) with the HIGHEST percentage
-        let dominant = 0;
-        let maxPct   = 0;
-        for (let c = 1; c <= 5; c++) {
-          const p = parseFloat(pcts[c] || 0);
-          if (p > maxPct) { maxPct = p; dominant = c; }
-        }
-        return {
-          ...b,
-          pcts,
-          meanDepth: b.totalCells > 0 ? b.depthSum / b.totalCells : 0,
-          dominant,
-        };
-      });
-
-      result.sort((a, b) =>
-        b.dominant !== a.dominant
-          ? b.dominant - a.dominant
-          : a.name.localeCompare(b.name)
-      );
-
-      setBarangaySummary(result);
-    } catch (e) {
-      console.warn("[barangay summary]", e);
-    } finally {
-      setSummaryLoading(false);
-    }
+    return () => { cancelled = true; clearTimeout(slowTimer); };
   }, []);
 
   const fetchHistory = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/scenarios?limit=20`);
-      if (res.ok) setScenarios((await res.json()).scenarios || []);
-    } catch (_) {}
+      const res = await apiFetch("/api/scenarios?limit=20", { timeout: 15000 });
+      setScenarios((await res.json()).scenarios || []);
+    } catch {
+      // History is a convenience panel; a failure here must not disturb the map.
+    }
   }, []);
 
   const loadScenario = (s) => {
-    setResult({ summary: s.summary, hazard_class_counts: s.summary.hazard_class_counts, outputs: s.outputs, map_outputs: s.map_outputs });
+    setResult({
+      summary:             s.summary,
+      hazard_class_counts: s.summary.hazard_class_counts,
+      barangay_summary:    s.barangay_summary || [],
+      outputs:             s.outputs,
+      map_outputs:         s.map_outputs,
+    });
+    setCsvCells([]);
     setActiveTab("legend");
     setSheetOpen(false);
   };
 
+  // The per-cell hover readout is a nice-to-have that costs a multi-megabyte
+  // download, so it loads in the background after the map is already usable and
+  // fails silently. Nothing else on screen depends on it.
+  const loadHoverCells = useCallback(async (csvPath) => {
+    if (!csvPath) return;
+    try {
+      const res  = await apiFetch(csvPath, { timeout: 45000 });
+      const text = await res.text();
+      const lines   = text.trim().split("\n");
+      const headers = lines[0].split(",").map((h) => h.trim());
+      const xIdx    = headers.indexOf("x_coordinate");
+      const yIdx    = headers.indexOf("y_coordinate");
+      const codeIdx = headers.indexOf("hazard_code");
+      const dIdx    = headers.indexOf("predicted_depth_m");
+      const cells   = [];
+      for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].split(",");
+        if (cols.length < headers.length) continue;
+        const [lng, lat] = utmToWgs84Ref(parseFloat(cols[xIdx]), parseFloat(cols[yIdx]));
+        cells.push({ lat, lng, code: parseInt(cols[codeIdx]),
+          depth: dIdx >= 0 ? parseFloat(cols[dIdx]) : 0 });
+      }
+      setCsvCells(cells);
+    } catch {
+      // Hover detail unavailable; the map, legend and summary are unaffected.
+    }
+  }, []);
+
   const handlePredict = async (e) => {
     e.preventDefault();
-    setLoading(true); setError(""); setResult(null); setCsvCells([]);
+    setLoading(true); setError(""); setBootError(""); setResult(null); setCsvCells([]);
+    // Same idea as at startup: say the server is waking rather than showing a
+    // spinner that looks identical to a hang.
+    const slowTimer = setTimeout(() => setWaking(true), 5000);
     try {
-      const res = await fetch(`${API_BASE_URL}/api/predict`, {
+      // The per-barangay summary now arrives inside this one response. It used to
+      // be rebuilt in the browser from a 16.6 MB grid plus the prediction CSV, a
+      // transfer that regularly died and left the Summary tab empty.
+      const res = await apiFetch("/api/predict", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ duration: Number(duration), depth: Number(depth), antecedent: Number(antecedent) }),
+        timeout: 90000,
       });
-      if (!res.ok) throw new Error((await res.text()) || "Prediction failed.");
       const data = await res.json();
       setResult(data); setOverlayVisible(true); setActiveTab("legend");
       setSheetOpen(false); setSidebarCollapsed(false);
-      await fetchHistory();
-      // Compute barangay hazard summary from prediction CSV
-      if (data.outputs?.prediction_csv && barangayGeoJSON) {
-        const csvUrl = `${API_BASE_URL}${data.outputs.prediction_csv}`;
-        computeBarangaySummary(csvUrl, barangayGeoJSON);
-        // Also build lat/lng cell list for hover tooltip
-        fetch(csvUrl).then((r) => r.text()).then((text) => {
-          const lines   = text.trim().split("\n");
-          const headers = lines[0].split(",").map((h) => h.trim());
-          const xIdx    = headers.indexOf("x_coordinate");
-          const yIdx    = headers.indexOf("y_coordinate");
-          const codeIdx = headers.indexOf("hazard_code");
-          const dIdx    = headers.indexOf("predicted_depth_m");
-          const cells   = [];
-          for (let i = 1; i < lines.length; i++) {
-            const cols = lines[i].split(",");
-            if (cols.length < headers.length) continue;
-            const [lng, lat] = utmToWgs84Ref(parseFloat(cols[xIdx]), parseFloat(cols[yIdx]));
-            cells.push({ lat, lng, code: parseInt(cols[codeIdx]),
-              depth: dIdx >= 0 ? parseFloat(cols[dIdx]) : 0 });
-          }
-          setCsvCells(cells);
-        }).catch(() => {});
-      }
-    } catch (err) { setError(err.message || "Failed to fetch"); }
-    finally { setLoading(false); }
+      fetchHistory();
+      loadHoverCells(data.outputs?.prediction_csv);
+    } catch (err) {
+      setError(err.message || "Prediction failed.");
+    } finally {
+      clearTimeout(slowTimer);
+      setWaking(false);
+      setLoading(false);
+    }
   };
 
   const handleBarangayClick = (name) => {
@@ -487,19 +404,20 @@ export default function App() {
     feature.properties?.BRGY_NAME === highlightedName ? barangayHighlightStyle : barangayStyle,
   [highlightedName]);
 
+  // Restyle in place when the selection changes. Previously the layer was given a
+  // key of the highlighted name, which tore down and rebuilt all 37 polygons on
+  // every click and made the boundaries flicker.
+  useEffect(() => {
+    const layer = geojsonRef.current;
+    if (layer) layer.setStyle(getBarangayStyle);
+  }, [highlightedName, getBarangayStyle]);
+
   const onEachBarangay = useCallback((feature, layer) => {
     const name = feature.properties?.BRGY_NAME || "Unknown";
     layer.bindTooltip(name, { permanent: false, direction: "center", className: "brgy-tooltip" });
     layer.on("click", (e) => {
       setHighlightedName(name);
       setSelectedBarangay(feature);
-      // Auto-compute summary if prediction exists but summary not yet loaded
-      if (barangaySummary.length === 0) {
-        const csvPath = result?.outputs?.prediction_csv;
-        if (csvPath && barangayGeoJSON) {
-          computeBarangaySummary(`${API_BASE_URL}${csvPath}`, barangayGeoJSON);
-        }
-      }
       // Show popup at click position
       const mapEl = e.originalEvent.target.closest(".leaflet-map") ||
                     document.querySelector(".leaflet-map");
@@ -512,39 +430,64 @@ export default function App() {
         });
       }
     });
-  }, [barangaySummary, result, barangayGeoJSON, computeBarangaySummary]);
+  }, []);
 
   const handleTabClick = (tab) => { setActiveTab(tab); setSheetOpen(true); setSidebarCollapsed(false); };
 
   useEffect(() => { fetchHistory(); }, [fetchHistory]);
 
-  const summary       = result?.summary;
-  const hazardClasses = result?.hazard_class_counts || [];
-  const totalCells    = summary?.n_cells || 1;
-  const legendTotal   = gridTotal > 0 ? gridTotal : totalCells;
+  const summary         = result?.summary;
+  const barangaySummary  = result?.barangay_summary || [];
+  const areaTotals       = summary?.area_totals;
 
-  // Only codes 1-5 from model (exclude code 0 — will be recomputed below)
-  const activePct = hazardClasses
-    .filter((cls) => cls.code >= 1)
-    .map((cls) => ({
-      ...cls,
-      displayName: HAZARD_NAMES[cls.code] ?? cls.name,
-      depthRange:  DEPTH_RANGES[cls.code] ?? "—",
-      pct:         ((cls.cell_count / legendTotal) * 100).toFixed(1),
-    }));
+  const selectedSummary = highlightedName
+    ? barangaySummary.find((b) => b.name === highlightedName) || null
+    : null;
 
-  // No Hazard = all cells not predicted as flooded (filtered-out + nodata + model code 0)
-  const activeFloodedCount = hazardClasses
-    .filter((cls) => cls.code >= 1)
-    .reduce((sum, cls) => sum + cls.cell_count, 0);
-  const noHazardPct = (((legendTotal - activeFloodedCount) / legendTotal) * 100).toFixed(1);
-  const noHazardEntry = {
-    code: 0, displayName: "No Hazard", depthRange: "No inundation",
-    color: HAZARD_COLORS[0], pct: noHazardPct,
-  };
+  // The legend reports one scope at a time: the whole municipality, or a single
+  // barangay once one is selected. Both sides use the same denominator rule,
+  // every 30 m cell inside the boundary, so the two views are directly comparable
+  // and a barangay percentage never has to be mentally rescaled.
+  //
+  // Percentages are shares of land area. The old denominator was every cell of the
+  // raster bounding box, most of which lies outside the municipality, so "No Hazard"
+  // was really measuring how much of the rectangle went unmodelled.
+  const legendScope = selectedSummary
+    ? {
+        kind:          "barangay",
+        label:         selectedSummary.name,
+        areaKm2:       selectedSummary.area_km2,
+        counts:        selectedSummary.counts,
+        pcts:          selectedSummary.pcts,
+        maxDepth:      selectedSummary.max_depth_m,
+        maxDepthLand:  selectedSummary.max_depth_land_m,
+        channelCells:  selectedSummary.channel_cells,
+      }
+    : areaTotals
+    ? {
+        kind:          "municipality",
+        label:         "Sipocot",
+        areaKm2:       areaTotals.area_km2,
+        counts:        areaTotals.class_counts,
+        pcts:          areaTotals.class_pcts,
+        maxDepth:      summary?.max_depth_m ?? 0,
+        maxDepthLand:  summary?.max_depth_land_m ?? 0,
+        channelCells:  summary?.n_channel_cells ?? 0,
+      }
+    : null;
 
-  // Combined list: hazard classes first, No Hazard last
-  const withPct = [...activePct, noHazardEntry];
+  const withPct = legendScope
+    ? [1, 2, 3, 4, 5, 0].map((code) => ({
+        code,
+        displayName: HAZARD_NAMES[code],
+        depthRange:  DEPTH_RANGES[code],
+        color:       HAZARD_COLORS[code],
+        cell_count:  legendScope.counts?.[String(code)] ?? 0,
+        pct:         Number(legendScope.pcts?.[String(code)] ?? 0).toFixed(1),
+      }))
+    : [];
+
+  const clearSelection = () => { setHighlightedName(""); setSelectedBarangay(null); };
 
   const filteredBarangays = barangayList.filter((n) =>
     n.toLowerCase().includes(barangaySearch.toLowerCase())
@@ -552,7 +495,7 @@ export default function App() {
 
   return (
     <div className="app-root">
-      {loading && <LoadingOverlay />}
+      {loading && <LoadingOverlay waking={waking} />}
 
       {/* ── MOBILE TOP BAR ───────────────────────────────────────────────── */}
       <header className="mobile-topbar">
@@ -622,6 +565,7 @@ export default function App() {
               </form>
 
               {error && <div className="error-box">{error}</div>}
+              {!error && bootError && <div className="error-box">{bootError}</div>}
 
               {barangayList.length > 0 && (
                 <div className="barangay-section">
@@ -652,9 +596,9 @@ export default function App() {
                 </div>
               )}
 
-              {barangayList.length === 0 && (
+              {barangayList.length === 0 && !bootError && (
                 <p className="empty-hint" style={{ marginTop: 8 }}>
-                  Barangay boundaries unavailable. Check that the backend /api/barangays endpoint is running.
+                  Loading barangay boundaries…
                 </p>
               )}
             </div>
@@ -667,6 +611,74 @@ export default function App() {
                 <p className="empty-hint">Run a prediction first to see the hazard legend.</p>
               ) : (
                 <>
+                  <div className="legend-scope">
+                    <div className="legend-scope-head">
+                      <div>
+                        <span className="legend-scope-kind">
+                          {legendScope?.kind === "barangay" ? "Barangay" : "Municipality"}
+                        </span>
+                        <h3 className="legend-scope-name">{legendScope?.label ?? "Sipocot"}</h3>
+                      </div>
+                      <span className="legend-scope-area">{legendScope?.areaKm2 ?? 0} km²</span>
+                    </div>
+                    {legendScope?.kind === "barangay" ? (
+                      <button className="legend-scope-back" onClick={clearSelection}>
+                        ← Back to all of Sipocot
+                      </button>
+                    ) : (
+                      <p className="legend-scope-hint">
+                        Click any barangay on the map or in the list to see its own breakdown.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="legend-list">
+                    <h3 className="legend-title">
+                      Hazard classes · percent of {legendScope?.kind === "barangay" ? "barangay" : "municipal"} area
+                    </h3>
+                    {(() => {
+                      const maxP = Math.max(...withPct.map((c) => parseFloat(c.pct)));
+                      return withPct.map((cls) => (
+                        <div className="legend-item" key={cls.code}>
+                          <HazardSwatch color={cls.color} />
+                          <div className="legend-text">
+                            <span className="legend-name">{cls.displayName}</span>
+                            <span className="legend-depth">{cls.depthRange}</span>
+                          </div>
+                          <div className="legend-pct-block">
+                            <span className="legend-pct">{cls.pct}%</span>
+                            <div className="legend-bar-track">
+                              <div className="legend-bar-fill"
+                                style={{
+                                  width: `${(parseFloat(cls.pct) / maxP) * 100}%`,
+                                  background: cls.color || "#888"
+                                }} />
+                            </div>
+                          </div>
+                        </div>
+                      ));
+                    })()}
+                  </div>
+
+                  {legendScope && legendScope.maxDepth > 0 && (
+                    <div className="legend-depth-note">
+                      <span>
+                        Max depth on land <strong>{legendScope.maxDepthLand.toFixed(2)} m</strong>
+                      </span>
+                      {legendScope.channelCells > 0 && (
+                        <span className="legend-depth-channel">
+                          {legendScope.maxDepth.toFixed(2)} m including river channel cells
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  {highlightedName && !selectedSummary && (
+                    <p className="empty-hint" style={{ marginTop: 10 }}>
+                      No summary recorded for {highlightedName} in this scenario.
+                    </p>
+                  )}
+
                   <div className="map-controls">
                     <div className="control-row">
                       <label className="control-label">
@@ -693,44 +705,6 @@ export default function App() {
                       </div>
                     )}
                   </div>
-
-                  <div className="legend-list">
-                    <h3 className="legend-title">Flood Hazard Classes</h3>
-                    {(() => {
-                      const maxP = Math.max(...withPct.map((c) => parseFloat(c.pct)));
-                      return withPct.map((cls) => (
-                        <div className="legend-item" key={cls.code}>
-                          <HazardSwatch color={cls.color} />
-                          <div className="legend-text">
-                            <span className="legend-name">{cls.displayName}</span>
-                            <span className="legend-depth">{cls.depthRange}</span>
-                          </div>
-                          <div className="legend-pct-block">
-                            <span className="legend-pct">{cls.pct}%</span>
-                            <div className="legend-bar-track">
-                              <div className="legend-bar-fill"
-                                style={{
-                                  width: `${(parseFloat(cls.pct) / maxP) * 100}%`,
-                                  background: cls.color || "#888"
-                                }} />
-                            </div>
-                          </div>
-                        </div>
-                      ));
-                    })()}
-                  </div>
-
-                  {highlightedName && (
-                    <div className="brgy-selected-card">
-                      <span className="brgy-selected-icon">📍</span>
-                      <div>
-                        <span className="brgy-selected-label">Selected Barangay</span>
-                        <span className="brgy-selected-name">{highlightedName}</span>
-                      </div>
-                      <button className="brgy-selected-clear"
-                        onClick={() => { setHighlightedName(""); setSelectedBarangay(null); }}>✕</button>
-                    </div>
-                  )}
                 </>
               )}
             </div>
@@ -741,13 +715,10 @@ export default function App() {
             <div className="tab-pane">
               {!result ? (
                 <p className="empty-hint">Run a prediction first to see the barangay hazard summary.</p>
-              ) : summaryLoading ? (
-                <div className="summary-loading">
-                  <div className="btn-spinner" style={{ borderTopColor: "var(--cyan-400)" }} />
-                  <p>Computing barangay summary…</p>
-                </div>
               ) : barangaySummary.length === 0 ? (
-                <p className="empty-hint">No barangay data available. Check that barangay boundaries are loaded.</p>
+                <p className="empty-hint">
+                  This scenario carries no barangay summary. Re-run the prediction to generate one.
+                </p>
               ) : (
                 <>
                   <div className="section-label" style={{ marginBottom: 6 }}>
@@ -775,7 +746,6 @@ export default function App() {
                         <tr>
                           <th>Barangay</th>
                           <th>Dominant</th>
-                          <th>Max Depth</th>
                           <th title="No Hazard">NH %</th>
                           <th title="Low">L %</th>
                           <th title="Moderate">Mo %</th>
@@ -798,9 +768,6 @@ export default function App() {
                                   style={{ background: HAZARD_COLORS[b.dominant] }}>
                                   {HAZARD_NAMES[b.dominant] ?? "—"}
                                 </span>
-                              </td>
-                              <td className="brgy-summary-mono">
-                                {b.maxDepth > 0 ? `${b.maxDepth.toFixed(2)}m` : "—"}
                               </td>
                               {/* NH (code 0) first, then Low–Extreme (codes 1–5) */}
                               {[0,1,2,3,4,5].map((c) => (
@@ -825,7 +792,10 @@ export default function App() {
                     NH = No Hazard &nbsp;·&nbsp; L = Low &nbsp;·&nbsp; Mo = Moderate &nbsp;·&nbsp;
                     H = High &nbsp;·&nbsp; VH = Very High &nbsp;·&nbsp; X = Extreme
                     <br />
-                    Values represent percent (%) of barangay area
+                    Values represent percent (%) of total barangay area.
+                    <br />
+                    Select a barangay for its predicted depths, reported separately for land and for
+                    river channel cells.
                   </div>
                 </>
               )}
@@ -919,7 +889,7 @@ export default function App() {
                   ["Antecedent",       "Prior rainfall in mm"],
                   ["Intensity",        "Depth ÷ Duration (mm/hr)"],
                   ["Total Rain",       "Depth + Antecedent (mm)"],
-                  ["Antecedent Ratio", "Antecedent ÷ Total Rain"],
+                  ["Antecedent Ratio", "Antecedent ÷ Depth"],
                 ].map(([k, v]) => (
                   <div className="about-row" key={k}>
                     <span className="about-row-key">{k}</span>
@@ -977,6 +947,36 @@ export default function App() {
                   <strong style={{ color: "var(--slate-400)" }}>References:</strong> Eusebio et al. (2022) <em>Appl. Sci.</em> 12(19), 9456 — MGB-based 5-class scheme, Romblon PH.
                   Lagmay et al. (2017) <em>J. Environ. Sci.</em> 59, 13–23 — UP NOAH/Project NOAH PH framework.
                   Besarra et al. (2025) <em>J. Flood Risk Mgmt.</em> — fragility functions, Leyte PH.
+                </p>
+              </div>
+
+              {/* Reading the depths */}
+              <div className="about-section-label">Reading the Predicted Depths</div>
+              <div className="about-card">
+                <p className="about-card-body">
+                  The model predicts a water depth for every 30 m cell, including cells that lie on
+                  the river network itself. In those channel cells the predicted value is the depth
+                  of water in the channel, not the depth of flooding on land, so during a large storm
+                  they can legitimately reach well beyond the Extreme threshold. They are counted in
+                  the hazard classes like any other cell and nothing is removed, but the barangay
+                  table reports a separate <strong>Max land</strong> figure that leaves them out, and
+                  that is the number to use when judging inundation in populated areas.
+                </p>
+                <p className="about-card-body" style={{ marginTop: 8 }}>
+                  A cell is treated as river channel when its contributing drainage area reaches
+                  10<sup>4</sup> cells, about 9 km², a conventional channel-initiation threshold.
+                </p>
+              </div>
+
+              {/* Coverage */}
+              <div className="about-section-label">What the Percentages Mean</div>
+              <div className="about-card">
+                <p className="about-card-body">
+                  Hazard percentages in the legend and the barangay table are shares of land area,
+                  measured against every 30 m cell inside the relevant boundary. Cells the model
+                  filtered out as permanently dry are included in that denominator and counted as
+                  No Hazard, so the classes always sum to 100% of the area rather than to the subset
+                  of cells the model evaluated.
                 </p>
               </div>
 
@@ -1082,7 +1082,7 @@ export default function App() {
           {sidebarCollapsed ? "▶" : "◀"}
         </button>
 
-        {!result && !barangayGeoJSON && (
+        {!result && (
           <div className="map-placeholder">
             <div className="placeholder-inner">
               <span className="placeholder-icon">⛈</span>
@@ -1107,10 +1107,14 @@ export default function App() {
                 url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
                 maxZoom={19} />
             </LayersControl.BaseLayer>
+            {/* Esri's topographic service, same provider as the imagery layer above.
+                The previous source was mt{0-3}.google.com/vt, an undocumented endpoint
+                that Google does not support for third-party use and can block without
+                notice, which would leave this layer blank. */}
             <LayersControl.BaseLayer name="Terrain">
-              <TileLayer attribution="&copy; Google"
-                url="https://{s}.google.com/vt/lyrs=p&x={x}&y={y}&z={z}"
-                subdomains={["mt0","mt1","mt2","mt3"]} maxZoom={20} />
+              <TileLayer attribution="Tiles &copy; Esri"
+                url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}"
+                maxZoom={19} />
             </LayersControl.BaseLayer>
             {overlayUrl && bounds && (
               <LayersControl.Overlay checked={overlayVisible} name="Flood Hazard Overlay">
@@ -1119,7 +1123,7 @@ export default function App() {
             )}
             {barangayGeoJSON && barangayVisible && (
               <LayersControl.Overlay checked name="Barangay Boundaries">
-                <GeoJSON key={highlightedName} data={barangayGeoJSON}
+                <GeoJSON data={barangayGeoJSON}
                   style={getBarangayStyle} onEachFeature={onEachBarangay} ref={geojsonRef} />
               </LayersControl.Overlay>
             )}
@@ -1133,9 +1137,16 @@ export default function App() {
         </MapContainer>
 
         {/* ── MAP LEGEND OVERLAY — bottom right ────────────────────────── */}
-        {result && hazardClasses.length > 0 && (
+        {result && withPct.length > 0 && (
           <div className="map-legend-overlay">
-            <div className="map-legend-title">Flood Hazard</div>
+            <div className="map-legend-title">
+              {legendScope?.kind === "barangay" ? legendScope.label : "Flood Hazard"}
+            </div>
+            <div className="map-legend-sub">
+              {legendScope?.kind === "barangay"
+                ? `Barangay · ${legendScope.areaKm2} km²`
+                : `Sipocot · ${legendScope?.areaKm2 ?? 0} km²`}
+            </div>
             {withPct.map((cls) => (
               <div className="map-legend-row" key={cls.code}>
                 <span className="map-legend-swatch" style={{ background: cls.color || "#888" }} />
@@ -1190,9 +1201,14 @@ export default function App() {
                       )
                     ))}
                   </div>
-                  {bData.maxDepth > 0 && (
+                  {bData.max_depth_m > 0 && (
                     <div className="brgy-popup-depth">
-                      Max depth: <strong>{bData.maxDepth.toFixed(2)} m</strong>
+                      Max depth on land: <strong>{bData.max_depth_land_m.toFixed(2)} m</strong>
+                      {bData.channel_cells > 0 && (
+                        <span style={{ display: "block", fontSize: 10, opacity: 0.7, marginTop: 2 }}>
+                          {bData.max_depth_m.toFixed(2)} m including river channel cells
+                        </span>
+                      )}
                     </div>
                   )}
                 </div>

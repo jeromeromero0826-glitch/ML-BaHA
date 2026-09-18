@@ -1,0 +1,6 @@
+# Extra packages needed only to regenerate assets offline, never at runtime.
+# Install with: pip install -r requirements.txt -r requirements-dev.txt
+-r requirements.txt
+
+matplotlib==3.8.4   # scripts/build_barangay_index.py uses matplotlib.path for
+                    # vectorised point-in-polygon when assigning cells to barangays

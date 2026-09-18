@@ -1,0 +1,24 @@
+# Normalise line endings. Without this, a Windows checkout rewrites every text
+# file to CRLF and git reports whole files as changed: before this was added, the
+# working tree showed ~1.1 million lines of diff in the grid tables alone, none
+# of it a real content change.
+* text=auto eol=lf
+
+# Binary assets must never be touched by end-of-line conversion.
+*.npz  binary
+*.pkl  binary
+*.tif  binary
+*.tiff binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.ico  binary
+*.woff binary
+*.woff2 binary
+*.lnk  binary
+
+# Shapefile components
+*.shp binary
+*.shx binary
+*.dbf binary
+*.cpg binary
