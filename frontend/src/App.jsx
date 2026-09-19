@@ -45,6 +45,36 @@ async function apiFetch(path, opts = {}) {
   throw lastErr;
 }
 
+// ── Local scenario history ───────────────────────────────────────────────────
+// The prediction cache on the server is deliberately shared: its whole value is
+// that one person's run makes the same run instant for everyone else. History is
+// the opposite — it should be the scenarios YOU ran, so this is kept per browser.
+//
+// Only the three inputs and a timestamp are stored, never the outputs. Output
+// files are rotated server-side, so a stored result would eventually point at
+// files that no longer exist. Loading an entry re-requests it instead, which the
+// shared cache usually answers immediately.
+const HISTORY_KEY = "mlbaha.history.v1";
+const HISTORY_MAX = 20;
+
+function readHistory() {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];   // private browsing, blocked storage, or corrupt value
+  }
+}
+
+function writeHistory(list) {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(list.slice(0, HISTORY_MAX)));
+  } catch {
+    // Storage unavailable or full. History is a convenience; carry on without it.
+  }
+}
+
 const HAZARD_NAMES = {
   0: "No Hazard", 1: "Low",      2: "Moderate",
   3: "High",      4: "Very High", 5: "Extreme",
@@ -190,14 +220,14 @@ function DownloadBtn({ href, label, icon }) {
 }
 
 function ScenarioRow({ s, onLoad }) {
-  const r = s.rainfall;
   return (
     <div className="scenario-row">
       <div className="scenario-meta">
-        <span className="scenario-ts">{s.timestamp}</span>
-        <span className="scenario-params">{r.depth}mm / {r.duration}h / API:{r.antecedent}mm</span>
+        <span className="scenario-ts">{new Date(s.ts).toLocaleString()}</span>
+        <span className="scenario-params">{s.depth}mm / {s.duration}h / API:{s.antecedent}mm</span>
       </div>
-      <button className="scenario-load-btn" onClick={() => onLoad(s)}>Load</button>
+      <button className="scenario-load-btn" onClick={() => onLoad(s)}
+        aria-label={`Re-run ${s.depth} millimetres over ${s.duration} hours`}>Load</button>
     </div>
   );
 }
@@ -244,7 +274,7 @@ export default function App() {
   const [result,    setResult]    = useState(null);
   const [loading,   setLoading]   = useState(false);
   const [error,     setError]     = useState("");
-  const [scenarios, setScenarios] = useState([]);
+  const [scenarios, setScenarios] = useState(() => readHistory());
 
   const [opacity,          setOpacity]          = useState(0.75);
   const [overlayVisible,   setOverlayVisible]   = useState(true);
@@ -328,27 +358,20 @@ export default function App() {
     return () => { cancelled = true; clearTimeout(slowTimer); };
   }, []);
 
-  const fetchHistory = useCallback(async () => {
-    try {
-      const res = await apiFetch("/api/scenarios?limit=20", { timeout: 15000 });
-      setScenarios((await res.json()).scenarios || []);
-    } catch {
-      // History is a convenience panel; a failure here must not disturb the map.
-    }
+  const rememberScenario = useCallback((duration, depth, antecedent) => {
+    setScenarios((prev) => {
+      // One entry per distinct scenario, most recent first.
+      const rest = prev.filter(
+        (e) => !(e.duration === duration && e.depth === depth && e.antecedent === antecedent)
+      );
+      const next = [{ id: `${duration}_${depth}_${antecedent}_${Date.now()}`,
+                      ts: Date.now(), duration, depth, antecedent }, ...rest];
+      writeHistory(next);
+      return next.slice(0, HISTORY_MAX);
+    });
   }, []);
 
-  const loadScenario = (s) => {
-    setResult({
-      summary:             s.summary,
-      hazard_class_counts: s.summary.hazard_class_counts,
-      barangay_summary:    s.barangay_summary || [],
-      outputs:             s.outputs,
-      map_outputs:         s.map_outputs,
-    });
-    setCsvCells([]);
-    setActiveTab("legend");
-    setSheetOpen(false);
-  };
+  const clearHistory = () => { setScenarios([]); writeHistory([]); };
 
   // The per-cell hover readout is a nice-to-have that costs a multi-megabyte
   // download, so it loads in the background after the map is already usable and
@@ -378,8 +401,7 @@ export default function App() {
     }
   }, []);
 
-  const handlePredict = async (e) => {
-    e.preventDefault();
+  const runPrediction = useCallback(async (dur, dep, ant) => {
     setLoading(true); setError(""); setBootError(""); setResult(null); setCsvCells([]); setTiming(null);
     // Same idea as at startup: say the server is waking rather than showing a
     // spinner that looks identical to a hang.
@@ -397,20 +419,23 @@ export default function App() {
       const res = await apiFetch("/api/predict", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ duration: Number(duration), depth: Number(depth), antecedent: Number(antecedent) }),
+        body: JSON.stringify({ duration: dur, depth: dep, antecedent: ant }),
         timeout: 90000,
         retries: 2,
         retryDelay: 4000,
       });
       // Server-measured compute time, so it excludes network and cold start.
+      // Note the explicit null check: a cache hit reports 0 ms, and `|| null`
+      // would treat that as missing and hide the very thing worth showing.
+      const rawMs = res.headers.get("X-Prediction-Time-Ms");
       setTiming({
-        ms: Number(res.headers.get("X-Prediction-Time-Ms")) || null,
+        ms: rawMs === null || rawMs === "" ? null : Number(rawMs),
         cached: res.headers.get("X-Cache") === "HIT",
       });
       const data = await res.json();
       setResult(data); setOverlayVisible(true); setActiveTab("legend");
       setSheetOpen(false); setSidebarCollapsed(false);
-      fetchHistory();
+      rememberScenario(dur, dep, ant);
       loadHoverCells(data.outputs?.prediction_csv);
     } catch (err) {
       setError(err.message || "Prediction failed.");
@@ -419,6 +444,20 @@ export default function App() {
       setWaking(false);
       setLoading(false);
     }
+  }, [loadHoverCells, rememberScenario]);
+
+  const handlePredict = (e) => {
+    e.preventDefault();
+    runPrediction(Number(duration), Number(depth), Number(antecedent));
+  };
+
+  // Re-request rather than restoring a stored result: output files are rotated
+  // server-side, so a saved result would eventually reference deleted files.
+  // The shared cache normally answers this immediately.
+  const loadScenario = (s) => {
+    setDuration(s.duration); setDepth(s.depth); setAntecedent(s.antecedent);
+    setSheetOpen(false);
+    runPrediction(s.duration, s.depth, s.antecedent);
   };
 
   const handleBarangayClick = (name) => {
@@ -461,8 +500,6 @@ export default function App() {
   }, []);
 
   const handleTabClick = (tab) => { setActiveTab(tab); setSheetOpen(true); setSidebarCollapsed(false); };
-
-  useEffect(() => { fetchHistory(); }, [fetchHistory]);
 
   const summary         = result?.summary;
   const barangaySummary  = result?.barangay_summary || [];
@@ -870,14 +907,22 @@ export default function App() {
           {activeTab === "history" && (
             <div className="tab-pane" role="tabpanel" id="panel-history" aria-labelledby="tab-history" tabIndex={-1}>
               <div className="history-header">
-                <h3>Past Scenarios</h3>
-                <button className="refresh-btn" onClick={fetchHistory}>↻ Refresh</button>
+                <h3>Your Scenarios</h3>
+                {scenarios.length > 0 && (
+                  <button className="refresh-btn" onClick={clearHistory}>✕ Clear</button>
+                )}
               </div>
               {scenarios.length === 0
                 ? <p className="empty-hint">No scenarios yet. Run a prediction to start building history.</p>
-                : <div className="scenario-list">
-                    {scenarios.map((s) => <ScenarioRow key={s.scenario_id} s={s} onLoad={loadScenario} />)}
-                  </div>
+                : <>
+                    <div className="scenario-list">
+                      {scenarios.map((s) => <ScenarioRow key={s.id} s={s} onLoad={loadScenario} />)}
+                    </div>
+                    <p className="history-note">
+                      Kept in this browser only, so this list is yours. Loading one re-runs it,
+                      which is usually instant because results are cached on the server.
+                    </p>
+                  </>
               }
             </div>
           )}
