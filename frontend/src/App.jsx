@@ -264,6 +264,7 @@ export default function App() {
   const geojsonRef  = useRef(null);
   const [csvCells, setCsvCells] = useState([]); // lat/lng cells for hover tooltip
   const [waking,    setWaking]    = useState(false); // backend cold start in progress
+  const [timing,    setTiming]    = useState(null);  // { ms, cached } of the last run
   const [bootError, setBootError] = useState("");
 
   const mapOutputs = result?.map_outputs;
@@ -379,7 +380,7 @@ export default function App() {
 
   const handlePredict = async (e) => {
     e.preventDefault();
-    setLoading(true); setError(""); setBootError(""); setResult(null); setCsvCells([]);
+    setLoading(true); setError(""); setBootError(""); setResult(null); setCsvCells([]); setTiming(null);
     // Same idea as at startup: say the server is waking rather than showing a
     // spinner that looks identical to a hang.
     const slowTimer = setTimeout(() => setWaking(true), 5000);
@@ -400,6 +401,11 @@ export default function App() {
         timeout: 90000,
         retries: 2,
         retryDelay: 4000,
+      });
+      // Server-measured compute time, so it excludes network and cold start.
+      setTiming({
+        ms: Number(res.headers.get("X-Prediction-Time-Ms")) || null,
+        cached: res.headers.get("X-Cache") === "HIT",
       });
       const data = await res.json();
       setResult(data); setOverlayVisible(true); setActiveTab("legend");
@@ -660,6 +666,13 @@ export default function App() {
                       </div>
                       <span className="legend-scope-area">{legendScope?.areaKm2 ?? 0} km²</span>
                     </div>
+                    {timing?.ms != null && (
+                      <p className="legend-scope-timing">
+                        {timing.cached
+                          ? "Served from cache, no recomputation"
+                          : `Computed in ${(timing.ms / 1000).toFixed(1)} s`}
+                      </p>
+                    )}
                     {legendScope?.kind === "barangay" ? (
                       <button className="legend-scope-back" onClick={clearSelection}>
                         ← Back to all of Sipocot

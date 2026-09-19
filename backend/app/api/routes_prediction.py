@@ -59,7 +59,9 @@ def predict_flood_hazard(payload: PredictionRequest, request: Request):
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
     response_data = {
-        "message":            "Prediction completed successfully.",
+        "message":            "Served from cache." if result.get("cached")
+                              else "Prediction completed successfully.",
+        "cached":             bool(result.get("cached")),
         "input_rainfall":     result["rainfall"],
         "summary":            result["summary"],
         "hazard_class_counts":result["summary"]["hazard_class_counts"],
@@ -70,6 +72,7 @@ def predict_flood_hazard(payload: PredictionRequest, request: Request):
 
     response = JSONResponse(content=response_data)
     response.headers["X-Prediction-Time-Ms"] = str(elapsed_ms)
+    response.headers["X-Cache"] = "HIT" if result.get("cached") else "MISS"
     return response
 
 

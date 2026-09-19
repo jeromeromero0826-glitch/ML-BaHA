@@ -24,10 +24,14 @@ GRID_METADATA_PATH = TABLES_DIR / "grid_metadata.json"
 BARANGAY_META_PATH = TABLES_DIR / "barangay_meta.json"
 BARANGAY_INDEX_PATH = TABLES_DIR / "barangay_index.npz"
 
-# How many recent scenarios keep their output files on disk. The history
-# endpoint only ever lists scenarios whose files still exist, so this is both
-# the disk budget and the length of the history panel.
-MAX_RETAINED_SCENARIOS = 5
+# How many recent scenarios keep their output files on disk. The history endpoint
+# only ever lists scenarios whose files still exist, so this is the disk budget,
+# the length of the history panel, and the depth of the prediction cache all at
+# once: a repeat of any retained scenario is served without recomputing.
+# Each scenario is roughly 8.6 MB on disk (depth raster 1.9, hazard raster 0.5,
+# per-cell CSV 6.1, overlay PNG and summary JSON the remainder), so 8 is about
+# 70 MB. Raise it for a higher cache hit rate if the instance has the disk.
+MAX_RETAINED_SCENARIOS = 8
 
 DEPTH_NODATA = -9999.0
 DEFAULT_HAZARD_NODATA = 255

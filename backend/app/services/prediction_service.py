@@ -66,6 +66,35 @@ def _scenario_files(entry: dict) -> list[Path]:
     return paths
 
 
+def _find_cached_scenario(duration: float, depth: float, antecedent: float) -> dict | None:
+    """
+    Return a retained scenario computed from exactly these inputs, or None.
+
+    A prediction is deterministic in its three rainfall inputs, so repeating a
+    scenario recomputes an identical answer. On a small instance that is roughly
+    26 seconds of CPU for a result already sitting on disk.
+
+    The cache is the scenario registry rather than a separate structure, which
+    makes a whole class of bug impossible: eviction removes the registry entry
+    and deletes its files together under one lock, so there is no way to serve a
+    hit whose outputs have already been deleted. The overlay is still checked on
+    disk before serving, in case a file was removed from outside the process.
+    """
+    key = _rainfall_cache_key(duration, depth, antecedent)
+    with _registry_lock:
+        for entry in reversed(_scenario_registry):      # newest first
+            r = entry.get("rainfall") or {}
+            if _rainfall_cache_key(r.get("duration", -1),
+                                   r.get("depth", -1),
+                                   r.get("antecedent", -1)) != key:
+                continue
+            overlay = (entry.get("map_outputs") or {}).get("hazard_png", "")
+            if overlay.startswith("/outputs/") and not (OUTPUTS_DIR / overlay[len("/outputs/"):]).exists():
+                break       # files are gone; fall through and recompute
+            return entry
+    return None
+
+
 def _register_scenario(entry: dict) -> None:
     """
     Record a scenario and retire the oldest ones past the retention cap.
@@ -308,6 +337,19 @@ def save_outputs(
 def run_prediction(duration: float, depth: float, antecedent: float, assets: dict) -> dict:
     validate_inputs(duration, depth, antecedent)
 
+    # Identical inputs give an identical answer, so reuse one we still hold.
+    hit = _find_cached_scenario(duration, depth, antecedent)
+    if hit is not None:
+        return {
+            "rainfall":            hit["rainfall"],
+            "summary":             hit["summary"],
+            "hazard_class_counts": hit["summary"]["hazard_class_counts"],
+            "barangay_summary":    hit.get("barangay_summary", []),
+            "outputs":             hit["outputs"],
+            "map_outputs":         hit["map_outputs"],
+            "cached":              True,
+        }
+
     model         = assets["model"]
     feature_names = assets["feature_names"]
     hazard_config = assets["hazard_config"]
@@ -392,4 +434,5 @@ def run_prediction(duration: float, depth: float, antecedent: float, assets: dic
         "barangay_summary":   barangay_summary,
         "outputs":            saved["outputs"],
         "map_outputs":        saved["map_outputs"],
+        "cached":             False,
     }

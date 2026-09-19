@@ -54,7 +54,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Prediction-Time-Ms"],
+    expose_headers=["X-Prediction-Time-Ms", "X-Cache"],
 )
 
 app.include_router(prediction_router, prefix="/api")

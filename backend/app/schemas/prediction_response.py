@@ -76,6 +76,7 @@ class MapOutputs(_FlexModel):
 
 class PredictionResponse(_FlexModel):
     message: str
+    cached: bool = False
     input_rainfall: RainfallFeatures
     summary: PredictionSummary
     hazard_class_counts: List[HazardClassCount]
