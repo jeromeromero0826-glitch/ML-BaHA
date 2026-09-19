@@ -524,9 +524,6 @@ export default function App() {
         areaKm2:       selectedSummary.area_km2,
         counts:        selectedSummary.counts,
         pcts:          selectedSummary.pcts,
-        maxDepth:      selectedSummary.max_depth_m,
-        maxDepthLand:  selectedSummary.max_depth_land_m,
-        channelCells:  selectedSummary.channel_cells,
       }
     : areaTotals
     ? {
@@ -535,9 +532,6 @@ export default function App() {
         areaKm2:       areaTotals.area_km2,
         counts:        areaTotals.class_counts,
         pcts:          areaTotals.class_pcts,
-        maxDepth:      summary?.max_depth_m ?? 0,
-        maxDepthLand:  summary?.max_depth_land_m ?? 0,
-        channelCells:  summary?.n_channel_cells ?? 0,
       }
     : null;
 
@@ -748,19 +742,6 @@ export default function App() {
                       ));
                     })()}
                   </div>
-
-                  {legendScope && legendScope.maxDepth > 0 && (
-                    <div className="legend-depth-note">
-                      <span>
-                        Max depth on land <strong>{legendScope.maxDepthLand.toFixed(2)} m</strong>
-                      </span>
-                      {legendScope.channelCells > 0 && (
-                        <span className="legend-depth-channel">
-                          {legendScope.maxDepth.toFixed(2)} m including river channel cells
-                        </span>
-                      )}
-                    </div>
-                  )}
 
                   {highlightedName && !selectedSummary && (
                     <p className="empty-hint" style={{ marginTop: 10 }}>
