@@ -29,9 +29,14 @@ async function apiFetch(path, opts = {}) {
       return res;
     } catch (err) {
       clearTimeout(timer);
+      // A fetch rejection here is usually the backend still starting up rather
+      // than a genuine cross-origin misconfiguration; say something the user can
+      // act on instead of surfacing the browser's raw wording.
       lastErr = err?.name === "AbortError"
         ? new Error(`Request timed out after ${Math.round(timeout / 1000)}s`)
-        : err;
+        : (err instanceof TypeError
+            ? new Error("Could not reach the prediction server. It may still be starting up; try again in a moment.")
+            : err);
       if (attempt < retries) {
         await new Promise((r) => setTimeout(r, retryDelay * (attempt + 1)));
       }
@@ -373,11 +378,19 @@ export default function App() {
       // The per-barangay summary now arrives inside this one response. It used to
       // be rebuilt in the browser from a 16.6 MB grid plus the prediction CSV, a
       // transfer that regularly died and left the Summary tab empty.
+      // Retries matter here specifically because of the cold start. While the
+      // instance is booting, the host's proxy answers before the app does, and
+      // that response carries no CORS headers, so the browser reports a CORS
+      // failure rather than the 502 it actually is. Without a retry that is a
+      // dead end: the user clicks Run Prediction, sees "Failed to fetch", and
+      // has to click again. These attempts fail fast, so retrying costs little.
       const res = await apiFetch("/api/predict", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ duration: Number(duration), depth: Number(depth), antecedent: Number(antecedent) }),
         timeout: 90000,
+        retries: 2,
+        retryDelay: 4000,
       });
       const data = await res.json();
       setResult(data); setOverlayVisible(true); setActiveTab("legend");
