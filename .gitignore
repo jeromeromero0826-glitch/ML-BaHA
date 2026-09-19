@@ -11,3 +11,5 @@ dist/
 # Generated prediction outputs. These are produced at runtime, wiped on startup,
 # and rotated per scenario, so they should never be committed.
 backend/outputs/
+
+.vercel
