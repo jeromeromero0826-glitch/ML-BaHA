@@ -65,6 +65,18 @@ def save_hover_grid(
         DEPTH_NODATA,
     ).astype("<u2")
 
+    # The GeoTIFF deliberately rewrites class 0 to nodata so No Hazard renders
+    # transparent on the overlay. Reading the hover grid off that raster would
+    # mean no readout at all over dry ground inside the municipality, where the
+    # per-cell CSV this replaced correctly said "No Hazard". A cell the model
+    # evaluated has a real depth, so valid depth plus the hazard sentinel means
+    # class 0 and nothing else; put it back. Cells outside the study area have
+    # no depth either and stay nodata, which is what suppresses the tooltip.
+    hazard = np.asarray(hazard_raster, dtype=np.uint8)
+    no_hazard = valid & (hazard == np.uint8(hazard_nodata))
+    if no_hazard.any():
+        hazard = np.where(no_hazard, np.uint8(0), hazard).astype(np.uint8)
+
     header = bytearray(HEADER_BYTES)
     header[0:4] = MAGIC
     header[4] = VERSION
@@ -74,7 +86,7 @@ def save_hover_grid(
     header[16:18] = int(DEPTH_NODATA).to_bytes(2, "little")
     header[18] = int(hazard_nodata) & 0xFF
 
-    hazard_bytes = np.ascontiguousarray(hazard_raster, dtype=np.uint8).tobytes()
+    hazard_bytes = np.ascontiguousarray(hazard, dtype=np.uint8).tobytes()
 
     # Keep the uint16 block on an even offset so the browser can wrap it in a
     # Uint16Array view directly instead of copying the buffer.
