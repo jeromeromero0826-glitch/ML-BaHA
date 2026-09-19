@@ -1031,3 +1031,23 @@ body {
     display: block;
   }
 }
+/* ── Input range hints and the extrapolation notice ───────────────────────── */
+.input-range {
+  display: block; margin-top: 5px;
+  font-size: 10px; font-family: var(--font-mono);
+  color: var(--slate-500); letter-spacing: 0.02em;
+}
+
+/* The model answers for a wider band than it was trained on, and says so.
+   Amber rather than red: the result is usable, it just is not validated. */
+.warn-box {
+  margin-top: 12px; padding: 10px 12px;
+  background: rgba(245, 158, 11, 0.10);
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  font-size: 11.5px; line-height: 1.6; color: var(--slate-300);
+}
+.warn-box strong { display: block; margin-bottom: 5px; color: var(--warning); }
+.warn-box ul { margin: 0 0 6px; padding-left: 16px; }
+.warn-box li { margin: 2px 0; }

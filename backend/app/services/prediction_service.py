@@ -30,7 +30,11 @@ from app.core.config import (
     OUTPUT_LOGS_DIR,
     OUTPUTS_DIR,
 )
-from app.services.rainfall_features import validate_inputs, compute_rainfall_features
+from app.services.rainfall_features import (
+    validate_inputs,
+    check_extrapolation,
+    compute_rainfall_features,
+)
 from app.services.hazard_mapper import (
     classify_hazard,
     convert_no_hazard_to_nodata,
@@ -42,6 +46,7 @@ from app.services.geotiff_writer import (
     save_geotiff,
 )
 from app.services.map_renderer import render_hazard_png
+from app.services.hover_grid import save_hover_grid
 from app.services.barangay_summary import build_barangay_summary, build_area_totals
 
 # ---------------------------------------------------------------------------
@@ -93,6 +98,15 @@ def _find_cached_scenario(duration: float, depth: float, antecedent: float) -> d
                 break       # files are gone; fall through and recompute
             return entry
     return None
+
+
+def scenario_is_cached(duration: float, depth: float, antecedent: float) -> bool:
+    """
+    Whether this scenario would be served from cache. Used by the rate limiter so
+    that repeating a scenario someone else already ran costs no compute budget.
+    Side-effect free.
+    """
+    return _find_cached_scenario(duration, depth, antecedent) is not None
 
 
 def _register_scenario(entry: dict) -> None:
@@ -234,7 +248,8 @@ def build_summary(
 # ---------------------------------------------------------------------------
 
 def ensure_output_dirs() -> None:
-    for d in (OUTPUT_RASTERS_DIR, OUTPUT_CSV_DIR, OUTPUT_LOGS_DIR, OUTPUTS_DIR / "maps"):
+    for d in (OUTPUT_RASTERS_DIR, OUTPUT_CSV_DIR, OUTPUT_LOGS_DIR,
+              OUTPUTS_DIR / "maps", OUTPUTS_DIR / "grids"):
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -250,7 +265,8 @@ def purge_output_dirs() -> int:
         (OUTPUT_RASTERS_DIR, "*.tif"),
         (OUTPUT_CSV_DIR,     "*.csv"),
         (OUTPUT_LOGS_DIR,    "*.json"),
-        (OUTPUTS_DIR / "maps", "*.png"),
+        (OUTPUTS_DIR / "maps",  "*.png"),
+        (OUTPUTS_DIR / "grids", "*.bin"),
     ):
         if folder.exists():
             for f in folder.glob(pattern):
@@ -295,6 +311,7 @@ def save_outputs(
     overlay_png_path   = OUTPUTS_DIR / "maps" / f"{scenario_id}_hazard.png"
     csv_path           = OUTPUT_CSV_DIR  / f"{scenario_id}_predicted_cells.csv"
     summary_path       = OUTPUT_LOGS_DIR / f"{scenario_id}_summary.json"
+    hover_grid_path    = OUTPUTS_DIR / "grids" / f"{scenario_id}_hover.bin"
 
     raster_meta = clean_raster_metadata(grid_metadata["meta"])
 
@@ -302,6 +319,16 @@ def save_outputs(
     save_geotiff(hazard_raster_path, hazard_raster, raster_meta, dtype="uint8",   nodata=hazard_nodata)
 
     output_df.to_csv(csv_path, index=False)
+
+    # Packed per-cell grid for the map hover readout. Two orders of magnitude
+    # smaller than shipping the CSV to the browser for the same purpose.
+    save_hover_grid(
+        path=hover_grid_path,
+        depth_raster=depth_raster,
+        hazard_raster=hazard_raster,
+        hazard_nodata=hazard_nodata,
+        depth_nodata_in=DEPTH_NODATA,
+    )
 
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=4)
@@ -320,6 +347,7 @@ def save_outputs(
             "prediction_csv":f"/outputs/csv/{csv_path.name}",
             "summary_json":  f"/outputs/logs/{summary_path.name}",
             "hazard_png":    f"/outputs/maps/{overlay_png_path.name}",
+            "hover_grid":    f"/outputs/grids/{hover_grid_path.name}",
         },
         "map_outputs": {
             "hazard_png": f"/outputs/maps/{overlay_png_path.name}",
@@ -337,10 +365,15 @@ def save_outputs(
 def run_prediction(duration: float, depth: float, antecedent: float, assets: dict) -> dict:
     validate_inputs(duration, depth, antecedent)
 
+    # Accepted, but is it inside what the surrogate was trained on? Recomputed
+    # per request rather than stored, since it depends only on the three inputs.
+    extrapolation = check_extrapolation(duration, depth, antecedent)
+
     # Identical inputs give an identical answer, so reuse one we still hold.
     hit = _find_cached_scenario(duration, depth, antecedent)
     if hit is not None:
         return {
+            "extrapolation":       extrapolation,
             "rainfall":            hit["rainfall"],
             "summary":             hit["summary"],
             "hazard_class_counts": hit["summary"]["hazard_class_counts"],
@@ -428,6 +461,7 @@ def run_prediction(duration: float, depth: float, antecedent: float, assets: dic
     })
 
     return {
+        "extrapolation":      extrapolation,
         "rainfall":           rainfall,
         "summary":            summary,
         "hazard_class_counts":summary["hazard_class_counts"],

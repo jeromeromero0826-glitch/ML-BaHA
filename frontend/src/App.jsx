@@ -99,6 +99,16 @@ const HAZARD_ON_COLOR = {
   3: "#0a1525", 4: "#ffffff", 5: "#ffffff",
 };
 
+// Mirrors ACCEPTED_RANGE and TRAINING_RANGE in
+// backend/app/services/rainfall_features.py. The browser bounds are a courtesy
+// so the field itself rejects nonsense; the server enforces the same limits and
+// is the one that decides.
+const INPUT_LIMITS = {
+  duration:   { min: 0.5, max: 72,   trained: "7 – 40 h" },
+  depth:      { min: 0,   max: 1250, trained: "50 – 839 mm" },
+  antecedent: { min: 0,   max: 400,  trained: "8 – 206 mm" },
+};
+
 const HOTLINES = [
   { label: "MDRRMO Sipocot", number: "0907-030-5000", icon: "🚨" },
   { label: "BFP Sipocot",    number: "0999-938-0063", icon: "🚒" },
@@ -107,28 +117,64 @@ const HOTLINES = [
   { label: "MSWDO Sipocot",  number: "0917-854-5409", icon: "🏛" },
 ];
 
-// ── UTM Zone 51N → WGS84 (Bowring approximation) ─────────────────────────────
-function utmToWgs84Ref(easting, northing) {
-  const k0 = 0.9996, a = 6378137, e2 = 0.00669438;
-  const e1  = (1 - Math.sqrt(1-e2)) / (1 + Math.sqrt(1-e2));
-  const x   = easting - 500000;
-  const y   = northing;
-  const M   = y / k0;
-  const mu  = M / (a * (1 - e2/4 - 3*e2*e2/64));
-  const p1  = mu + (3*e1/2 - 27*e1*e1*e1/32) * Math.sin(2*mu);
-  const p2  = p1 + (21*e1*e1/16 - 55*e1*e1*e1*e1/32) * Math.sin(4*mu);
-  const p3  = p2 + (151*e1*e1*e1/96) * Math.sin(6*mu);
-  const lat1= p3;
-  const N1  = a / Math.sqrt(1 - e2*Math.sin(lat1)**2);
-  const T1  = Math.tan(lat1)**2;
-  const C1  = e2*Math.cos(lat1)**2 / (1-e2);
-  const R1  = a*(1-e2) / Math.pow(1-e2*Math.sin(lat1)**2, 1.5);
-  const D   = x / (N1*k0);
-  const lat = lat1 - (N1*Math.tan(lat1)/R1)*(D*D/2-(5+3*T1+10*C1-4*C1*C1-9*e2)*D*D*D*D/24);
-  const lon0= ((51-1)*6-180+3)*Math.PI/180;
-  const lon = lon0 + (D-(1+2*T1+C1)*D*D*D/6)/Math.cos(lat1);
-  return [lon*180/Math.PI, lat*180/Math.PI];
+// ── Packed hover grid ────────────────────────────────────────────────────────
+// The per-cell readout used to come from the full prediction CSV: 5.6 MB of
+// text, 1.8 MB on the wire, parsed into 68,276 objects that were then scanned
+// linearly on every mouse move. The backend now writes the same information as
+// two raster-shaped arrays (see backend/app/services/hover_grid.py), 178 KB
+// gzipped, and because the overlay PNG is that same raster stretched onto a
+// latitude and longitude box, a cursor position maps to an array index by
+// arithmetic. No download of megabytes, and no search.
+const HOVER_MAGIC = 0x4748424d;    // "MBHG" read as a little-endian uint32
+
+function parseHoverGrid(buffer) {
+  const view = new DataView(buffer);
+  if (buffer.byteLength < 24 || view.getUint32(0, true) !== HOVER_MAGIC) {
+    throw new Error("Unrecognised hover grid file.");
+  }
+  if (view.getUint8(4) !== 1) throw new Error("Unsupported hover grid version.");
+
+  const depthScale   = view.getUint16(6, true);
+  const rows         = view.getUint32(8, true);
+  const cols         = view.getUint32(12, true);
+  const depthNodata  = view.getUint16(16, true);
+  const hazardNodata = view.getUint8(18);
+
+  const n = rows * cols;
+  const hazardOffset = 24;
+  const depthOffset  = hazardOffset + n + (n % 2);   // uint16 block is 2-aligned
+  if (buffer.byteLength < depthOffset + n * 2) {
+    throw new Error("Hover grid file is truncated.");
+  }
+  return {
+    rows, cols, depthScale, depthNodata, hazardNodata,
+    hazard: new Uint8Array(buffer, hazardOffset, n),
+    depth:  new Uint16Array(buffer, depthOffset, n),
+  };
 }
+
+// overlayBounds is Leaflet's [[south, west], [north, east]]; the image is drawn
+// across exactly that box, so the same linear mapping gives the cell under the
+// cursor. Returns null outside the raster.
+function sampleHoverGrid(grid, bounds, lat, lng) {
+  const [[south, west], [north, east]] = bounds;
+  if (lat < south || lat > north || lng < west || lng > east) return null;
+
+  const col = Math.min(grid.cols - 1, Math.floor(((lng - west) / (east - west)) * grid.cols));
+  const row = Math.min(grid.rows - 1, Math.floor(((north - lat) / (north - south)) * grid.rows));
+  if (col < 0 || row < 0) return null;
+
+  const i    = row * grid.cols + col;
+  const code = grid.hazard[i];
+  if (code === grid.hazardNodata) return null;
+
+  const raw = grid.depth[i];
+  return {
+    code,
+    depth: raw === grid.depthNodata ? null : raw / grid.depthScale,
+  };
+}
+
 function MapFitter({ bounds }) {
   const map = useMap();
   useEffect(() => {
@@ -158,31 +204,20 @@ function MapClickDismiss({ onDismiss }) {
   }, [map, onDismiss]);
   return null;
 }
-function MapHoverTooltip({ overlayBounds, csvCells }) {
+function MapHoverTooltip({ overlayBounds, grid }) {
   const map = useMap();
   const [tooltip, setTooltip] = useState(null);
 
-  const active = Boolean(overlayBounds && csvCells?.length);
+  const active = Boolean(overlayBounds && grid);
 
   useEffect(() => {
     if (!active) return undefined;
 
     const onMove = (e) => {
-      const { lat, lng } = e.latlng;
-      const [[s, w], [n, ee]] = overlayBounds;
-      if (lat < s || lat > n || lng < w || lng > ee) {
-        setTooltip(null); return;
-      }
-      // Find nearest cell
-      let best = null, bestDist = Infinity;
-      for (const c of csvCells) {
-        const d = (c.lat - lat) ** 2 + (c.lng - lng) ** 2;
-        if (d < bestDist) { bestDist = d; best = c; }
-      }
-      if (best) {
-        const pt = map.latLngToContainerPoint([lat, lng]);
-        setTooltip({ x: pt.x, y: pt.y, code: best.code, depth: best.depth });
-      }
+      const hit = sampleHoverGrid(grid, overlayBounds, e.latlng.lat, e.latlng.lng);
+      if (!hit) { setTooltip(null); return; }
+      const pt = map.latLngToContainerPoint(e.latlng);
+      setTooltip({ x: pt.x, y: pt.y, code: hit.code, depth: hit.depth });
     };
 
     const onOut = () => setTooltip(null);
@@ -193,7 +228,7 @@ function MapHoverTooltip({ overlayBounds, csvCells }) {
       map.off("mouseout",  onOut);
       setTooltip(null);
     };
-  }, [map, active, overlayBounds, csvCells]);
+  }, [map, active, overlayBounds, grid]);
 
   if (!active || !tooltip) return null;
   const name  = HAZARD_NAMES[tooltip.code] ?? "Unknown";
@@ -292,7 +327,7 @@ export default function App() {
   const [barangayPopup,    setBarangayPopup]    = useState(null); // { name, x, y }
 
   const geojsonRef  = useRef(null);
-  const [csvCells, setCsvCells] = useState([]); // lat/lng cells for hover tooltip
+  const [hoverGrid, setHoverGrid] = useState(null); // packed per-cell grid for the tooltip
   const [waking,    setWaking]    = useState(false); // backend cold start in progress
   const [timing,    setTiming]    = useState(null);  // { ms, cached } of the last run
   const [bootError, setBootError] = useState("");
@@ -300,6 +335,7 @@ export default function App() {
   const mapOutputs = result?.map_outputs;
   const overlayUrl = mapOutputs?.hazard_png ? `${API_BASE_URL}${mapOutputs.hazard_png}` : null;
   const bounds     = mapOutputs?.bounds || null;
+  const extrapolation = result?.extrapolation ?? [];
 
   const outputUrls = {
     depthRaster:   result?.outputs?.depth_raster   ? `${API_BASE_URL}${result.outputs.depth_raster}`   : null,
@@ -373,36 +409,22 @@ export default function App() {
 
   const clearHistory = () => { setScenarios([]); writeHistory([]); };
 
-  // The per-cell hover readout is a nice-to-have that costs a multi-megabyte
-  // download, so it loads in the background after the map is already usable and
-  // fails silently. Nothing else on screen depends on it.
-  const loadHoverCells = useCallback(async (csvPath) => {
-    if (!csvPath) return;
+  // The per-cell hover readout is a convenience, so it loads in the background
+  // once the map is already usable and fails silently. Nothing else on screen
+  // depends on it. At 178 KB gzipped it no longer competes with the page for
+  // bandwidth the way the 1.8 MB CSV did.
+  const loadHoverGrid = useCallback(async (gridPath) => {
+    if (!gridPath) return;
     try {
-      const res  = await apiFetch(csvPath, { timeout: 45000 });
-      const text = await res.text();
-      const lines   = text.trim().split("\n");
-      const headers = lines[0].split(",").map((h) => h.trim());
-      const xIdx    = headers.indexOf("x_coordinate");
-      const yIdx    = headers.indexOf("y_coordinate");
-      const codeIdx = headers.indexOf("hazard_code");
-      const dIdx    = headers.indexOf("predicted_depth_m");
-      const cells   = [];
-      for (let i = 1; i < lines.length; i++) {
-        const cols = lines[i].split(",");
-        if (cols.length < headers.length) continue;
-        const [lng, lat] = utmToWgs84Ref(parseFloat(cols[xIdx]), parseFloat(cols[yIdx]));
-        cells.push({ lat, lng, code: parseInt(cols[codeIdx]),
-          depth: dIdx >= 0 ? parseFloat(cols[dIdx]) : 0 });
-      }
-      setCsvCells(cells);
+      const res = await apiFetch(gridPath, { timeout: 30000 });
+      setHoverGrid(parseHoverGrid(await res.arrayBuffer()));
     } catch {
       // Hover detail unavailable; the map, legend and summary are unaffected.
     }
   }, []);
 
   const runPrediction = useCallback(async (dur, dep, ant) => {
-    setLoading(true); setError(""); setBootError(""); setResult(null); setCsvCells([]); setTiming(null);
+    setLoading(true); setError(""); setBootError(""); setResult(null); setHoverGrid(null); setTiming(null);
     // Same idea as at startup: say the server is waking rather than showing a
     // spinner that looks identical to a hang.
     const slowTimer = setTimeout(() => setWaking(true), 5000);
@@ -436,7 +458,7 @@ export default function App() {
       setResult(data); setOverlayVisible(true); setActiveTab("legend");
       setSheetOpen(false); setSidebarCollapsed(false);
       rememberScenario(dur, dep, ant);
-      loadHoverCells(data.outputs?.prediction_csv);
+      loadHoverGrid(data.outputs?.hover_grid);
     } catch (err) {
       setError(err.message || "Prediction failed.");
     } finally {
@@ -444,7 +466,7 @@ export default function App() {
       setWaking(false);
       setLoading(false);
     }
-  }, [loadHoverCells, rememberScenario]);
+  }, [loadHoverGrid, rememberScenario]);
 
   const handlePredict = (e) => {
     e.preventDefault();
@@ -623,17 +645,32 @@ export default function App() {
                 <div className="input-group">
                   <label htmlFor="duration">Storm Duration <span className="unit">hours</span></label>
                   <input id="duration" type="number" inputMode="decimal"
-                    value={duration} onChange={(e) => setDuration(e.target.value)} min="0" step="0.1" required />
+                    value={duration} onChange={(e) => setDuration(e.target.value)}
+                    min={INPUT_LIMITS.duration.min} max={INPUT_LIMITS.duration.max}
+                    step="0.1" required aria-describedby="duration-range" />
+                  <span className="input-range" id="duration-range">
+                    Trained on {INPUT_LIMITS.duration.trained}
+                  </span>
                 </div>
                 <div className="input-group">
                   <label htmlFor="depth">Rainfall Depth <span className="unit">mm</span></label>
                   <input id="depth" type="number" inputMode="decimal"
-                    value={depth} onChange={(e) => setDepth(e.target.value)} min="0" step="0.1" required />
+                    value={depth} onChange={(e) => setDepth(e.target.value)}
+                    min={INPUT_LIMITS.depth.min} max={INPUT_LIMITS.depth.max}
+                    step="0.1" required aria-describedby="depth-range" />
+                  <span className="input-range" id="depth-range">
+                    Trained on {INPUT_LIMITS.depth.trained}
+                  </span>
                 </div>
                 <div className="input-group">
                   <label htmlFor="antecedent">Antecedent Rainfall <span className="unit">mm</span></label>
                   <input id="antecedent" type="number" inputMode="decimal"
-                    value={antecedent} onChange={(e) => setAntecedent(e.target.value)} min="0" step="0.1" required />
+                    value={antecedent} onChange={(e) => setAntecedent(e.target.value)}
+                    min={INPUT_LIMITS.antecedent.min} max={INPUT_LIMITS.antecedent.max}
+                    step="0.1" required aria-describedby="antecedent-range" />
+                  <span className="input-range" id="antecedent-range">
+                    Trained on {INPUT_LIMITS.antecedent.trained}
+                  </span>
                 </div>
                 <button type="submit" className="predict-btn" disabled={loading}>
                   {loading ? <><span className="btn-spinner" /> Running…</> : "▶ Run Prediction"}
@@ -642,6 +679,19 @@ export default function App() {
 
               {error && <div className="error-box">{error}</div>}
               {!error && bootError && <div className="error-box">{bootError}</div>}
+
+              {/* The model is a surrogate for 109 HEC-RAS events. Past the edge of
+                  those events it still returns a number, and saying so is the
+                  difference between a prediction and a guess with a colour ramp. */}
+              {extrapolation.length > 0 && (
+                <div className="warn-box" role="status">
+                  <strong>Outside the trained range.</strong>
+                  <ul>
+                    {extrapolation.map((note) => <li key={note}>{note}</li>)}
+                  </ul>
+                  <span>Treat this map as an extrapolation, not a validated prediction.</span>
+                </div>
+              )}
 
               {barangayList.length > 0 && (
                 <div className="barangay-section">
@@ -1218,7 +1268,7 @@ export default function App() {
 
           <ScaleControl position="bottomleft" />
           {overlayUrl && bounds && (
-            <MapHoverTooltip overlayBounds={bounds} csvCells={csvCells} />
+            <MapHoverTooltip overlayBounds={bounds} grid={hoverGrid} />
           )}
           <MapClickDismiss onDismiss={() => setBarangayPopup(null)} />
         </MapContainer>

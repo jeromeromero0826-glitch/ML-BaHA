@@ -13,9 +13,14 @@ import time
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 
+from app.core.rate_limit import check_compute, check_request
 from app.schemas.prediction_request import PredictionRequest
 from app.schemas.prediction_response import PredictionResponse
-from app.services.prediction_service import run_prediction, get_scenario_history
+from app.services.prediction_service import (
+    get_scenario_history,
+    run_prediction,
+    scenario_is_cached,
+)
 
 router = APIRouter()
 
@@ -39,6 +44,12 @@ def health_check():
     summary="Predict Flood Hazard",
 )
 def predict_flood_hazard(payload: PredictionRequest, request: Request):
+    # Charged before any work. A scenario already in the cache costs no model
+    # run, so only genuinely new scenarios draw on the compute budget.
+    client = check_request(request)
+    if not scenario_is_cached(payload.duration, payload.depth, payload.antecedent):
+        check_compute(client)
+
     assets = request.app.state.assets
     t0 = time.perf_counter()
 
@@ -62,6 +73,7 @@ def predict_flood_hazard(payload: PredictionRequest, request: Request):
         "message":            "Served from cache." if result.get("cached")
                               else "Prediction completed successfully.",
         "cached":             bool(result.get("cached")),
+        "extrapolation":      result.get("extrapolation", []),
         "input_rainfall":     result["rainfall"],
         "summary":            result["summary"],
         "hazard_class_counts":result["summary"]["hazard_class_counts"],

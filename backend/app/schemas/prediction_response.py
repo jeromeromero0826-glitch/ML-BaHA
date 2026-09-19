@@ -65,6 +65,7 @@ class OutputFiles(_FlexModel):
     prediction_csv: str
     summary_json: str
     hazard_png: str
+    hover_grid: str
 
 
 class MapOutputs(_FlexModel):
@@ -77,6 +78,10 @@ class MapOutputs(_FlexModel):
 class PredictionResponse(_FlexModel):
     message: str
     cached: bool = False
+    # Empty when the scenario sits inside the range of the 109 training events.
+    # One note per input that does not, so the client can label the result
+    # instead of presenting an extrapolation as if it were a prediction.
+    extrapolation: List[str] = []
     input_rainfall: RainfallFeatures
     summary: PredictionSummary
     hazard_class_counts: List[HazardClassCount]

@@ -15,9 +15,59 @@
     <meta property="og:description" content="Scenario-based flood hazard maps and barangay-level summaries for Sipocot, Camarines Sur." />
     <meta property="og:url" content="https://ml-ba-ha.vercel.app" />
     <meta name="twitter:card" content="summary" />
+
+    <!-- The stylesheet pulls IBM Plex from Google Fonts with an @import, which
+         cannot start until the stylesheet itself has parsed. Opening the
+         connections now removes that round trip from the critical path. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+
+    <!-- First paint used to wait for the JavaScript bundle to download, parse
+         and render the whole application including Leaflet: measured at 3.0 s
+         against a page that was otherwise finished loading at 1.0 s. This shell
+         is plain markup with inline styles, so it paints as soon as the HTML
+         arrives. React clears it when it mounts into #root. -->
+    <style>
+      html, body { margin: 0; min-height: 100%; background: #050c18; }
+      #boot {
+        position: fixed; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 14px;
+        background: #050c18; color: #94a3b8;
+        font-family: "IBM Plex Sans", "Segoe UI", Arial, Helvetica, sans-serif;
+        text-align: center; padding: 24px;
+      }
+      #boot .mark {
+        font-size: 30px; letter-spacing: 0.14em; font-weight: 700; color: #e2e8f0;
+      }
+      #boot .sub {
+        font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+        max-width: 30ch; line-height: 1.7; color: #76869d;
+      }
+      #boot .bar {
+        width: 168px; height: 3px; border-radius: 3px;
+        background: #172b48; overflow: hidden;
+      }
+      #boot .bar i {
+        display: block; width: 40%; height: 100%; border-radius: 3px;
+        background: #22d3ee; animation: boot-slide 1.1s ease-in-out infinite;
+      }
+      @keyframes boot-slide {
+        0%   { transform: translateX(-100%); }
+        100% { transform: translateX(320%); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #boot .bar i { animation: none; width: 100%; opacity: 0.55; }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="boot">
+        <div class="mark">ML-BaHa</div>
+        <div class="sub">Machine learning-based flood hazard prediction and mapping system — Sipocot, Camarines Sur</div>
+        <div class="bar" role="progressbar" aria-label="Loading the application"><i></i></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

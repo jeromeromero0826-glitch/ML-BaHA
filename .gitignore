@@ -13,3 +13,12 @@ dist/
 backend/outputs/
 
 .vercel
+
+# Source data for the offline scripts in backend/scripts/. Neither file is read
+# by the server: filtered_dataset.pkl is the 109-event HEC-RAS training set that
+# build_grid_features.py consumes, and grid_all_cells.csv is the full-raster
+# table that build_barangay_index.py consumes. Together they were 46 MB of the
+# 91 MB deployed tree, downloaded on every cold start and never opened. They stay
+# on the developer's machine; see README for where to obtain them.
+backend/assets/data/filtered_dataset.pkl
+backend/assets/tables/grid_all_cells.csv

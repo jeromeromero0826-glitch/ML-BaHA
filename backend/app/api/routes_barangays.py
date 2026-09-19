@@ -1,24 +1,20 @@
 """
-routes_barangays.py
-Place at: backend/app/api/routes_barangays.py
+routes_barangays.py — Sipocot barangay boundaries for the Leaflet map.
 
-Reads Sipocot_Barangays.geojson from backend/assets/data/ and serves it
-to the frontend. No geopandas required — just a plain GeoJSON file.
+Reads Sipocot_Barangays.geojson from backend/assets/data/ once per process and
+serves it. The file is EPSG:4326 so Leaflet can draw it directly.
 
-Make sure your GeoJSON uses EPSG:4326 (WGS84) coordinates so Leaflet
-can render it correctly. Most GIS exports default to this.
-
-Register in main.py:
-    from app.api.routes_barangays import router as barangay_router
-    app.include_router(barangay_router, prefix="/api")
+The two grid endpoints that used to live here are gone. /grid-all-cells streamed
+a 16 MB CSV and /grid-total re-counted 479,272 lines on every call; both existed
+only to let the browser rebuild the barangay summary itself, which the server has
+computed since the summary moved into the prediction response.
 """
 
 import json
-import csv
 from pathlib import Path
+
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
-import io
+from fastapi.responses import JSONResponse
 
 router = APIRouter()
 
@@ -26,11 +22,12 @@ GEOJSON_PATH = (
     Path(__file__).resolve().parents[2] / "assets" / "data" / "Sipocot_Barangays.geojson"
 )
 
-GRID_ALL_PATH = (
-    Path(__file__).resolve().parents[2] / "assets" / "tables" / "grid_all_cells.csv"
-)
+# Boundaries change on the order of years, not minutes. Without this the CDN in
+# front of the instance marks every response DYNAMIC and each visitor both
+# re-downloads 39 KB and wakes a sleeping instance to get it.
+BOUNDARY_CACHE_CONTROL = "public, max-age=86400, stale-while-revalidate=604800"
 
-# ── Cache in memory so file is only read once per server start ────────────────
+# ── Cache in memory so the file is only read once per server start ────────────
 _cache: dict | None = None
 
 
@@ -70,8 +67,7 @@ def _load() -> dict:
                 p["BRGY_NAME"] = p.get(name_col, "Unknown")
 
     _cache = data
-    n = len(features)
-    print(f"[barangays] Loaded {n} barangay features from GeoJSON.")
+    print(f"[barangays] Loaded {len(features)} barangay features from GeoJSON.")
     return _cache
 
 
@@ -81,7 +77,10 @@ def _load() -> dict:
 def get_barangays():
     """Returns the full GeoJSON FeatureCollection for the Leaflet map."""
     try:
-        return JSONResponse(content=_load())
+        return JSONResponse(
+            content=_load(),
+            headers={"Cache-Control": BOUNDARY_CACHE_CONTROL},
+        )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -102,41 +101,7 @@ def get_barangay_names():
         if f.get("properties")
     } - {""})
 
-    return {"count": len(names), "barangays": names}
-
-
-@router.get("/grid-all-cells", summary="All spatial grid cells (active + filtered)")
-def get_grid_all_cells():
-    if not GRID_ALL_PATH.exists():
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                "grid_all_cells.csv not found. "
-                "Re-run export_grid_assets.py to generate it."
-            )
-        )
-    def iterfile():
-        with open(GRID_ALL_PATH, "rb") as f:
-            yield from f
-    return StreamingResponse(
-        iterfile(),
-        media_type="text/csv",
-        headers={"Content-Disposition": "inline; filename=grid_all_cells.csv"}
+    return JSONResponse(
+        content={"count": len(names), "barangays": names},
+        headers={"Cache-Control": BOUNDARY_CACHE_CONTROL},
     )
-
-
-@router.get("/grid-total", summary="Total number of grid cells in study area")
-def get_grid_total():
-    """
-    Returns the total cell count (active + filtered + nodata) for use as
-    the denominator in the map legend percentage computation.
-    """
-    if not GRID_ALL_PATH.exists():
-        raise HTTPException(status_code=404, detail="grid_all_cells.csv not found.")
-    # Count lines minus header
-    count = 0
-    with open(GRID_ALL_PATH, "r") as f:
-        for i, _ in enumerate(f):
-            if i > 0:
-                count += 1
-    return {"total_cells": count}
