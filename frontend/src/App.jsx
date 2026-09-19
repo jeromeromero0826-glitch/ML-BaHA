@@ -60,6 +60,15 @@ const HAZARD_COLORS = {
   3: "#ea580c", 4: "#dc2626", 5: "#991b1b",
 };
 
+// Text colour to place ON each hazard colour. White was used for every class,
+// which gives 1.53:1 on Low and 2.80:1 on Moderate, both well under the 4.5:1
+// WCAG AA threshold. Measured ratios with these values: Low 11.96, Moderate
+// 6.53, High 5.14, Very High 4.83, Extreme 8.31, No Hazard 10.31.
+const HAZARD_ON_COLOR = {
+  0: "#ffffff", 1: "#0a1525", 2: "#0a1525",
+  3: "#0a1525", 4: "#ffffff", 5: "#ffffff",
+};
+
 const HOTLINES = [
   { label: "MDRRMO Sipocot", number: "0907-030-5000", icon: "🚨" },
   { label: "BFP Sipocot",    number: "0999-938-0063", icon: "🚒" },
@@ -508,6 +517,20 @@ export default function App() {
 
   return (
     <div className="app-root">
+      {/* Announced by a screen reader when state changes; visually hidden. */}
+      <div className="sr-only" role="status" aria-live="polite">
+        {loading
+          ? (waking ? "Waking the prediction server." : "Running prediction.")
+          : error
+          ? `Prediction failed. ${error}`
+          : summary && areaTotals
+          ? `Prediction complete for ${summary.input_rainfall?.depth} millimetres over `
+            + `${summary.input_rainfall?.duration} hours. Across Sipocot, `
+            + [5, 4, 3, 2, 1].map((c) => `${HAZARD_NAMES[c]} ${areaTotals.class_pcts?.[String(c)] ?? 0} percent`).join(", ")
+            + `, and No Hazard ${areaTotals.class_pcts?.["0"] ?? 0} percent of municipal land area.`
+          : ""}
+      </div>
+
       {loading && <LoadingOverlay waking={waking} />}
 
       {/* ── MOBILE TOP BAR ───────────────────────────────────────────────── */}
@@ -543,9 +566,12 @@ export default function App() {
           </div>
         </div>
 
-        <nav className="tab-nav">
+        <nav className="tab-nav" role="tablist" aria-label="Panel sections">
           {Object.entries(TAB_LABELS).map(([tab, label]) => (
-            <button key={tab} className={`tab-btn ${activeTab === tab ? "active" : ""}`}
+            <button key={tab} id={`tab-${tab}`} role="tab"
+              aria-selected={activeTab === tab}
+              aria-controls={`panel-${tab}`}
+              className={`tab-btn ${activeTab === tab ? "active" : ""}`}
               onClick={() => handleTabClick(tab)}>{label}</button>
           ))}
         </nav>
@@ -554,7 +580,7 @@ export default function App() {
 
           {/* ── INPUTS ──────────────────────────────────────────────────── */}
           {activeTab === "inputs" && (
-            <div className="tab-pane">
+            <div className="tab-pane" role="tabpanel" id="panel-inputs" aria-labelledby="tab-inputs" tabIndex={-1}>
               <div className="section-label">Rainfall Parameters</div>
               <form onSubmit={handlePredict} className="input-form">
                 <div className="input-group">
@@ -619,7 +645,7 @@ export default function App() {
 
           {/* ── LEGEND ──────────────────────────────────────────────────── */}
           {activeTab === "legend" && (
-            <div className="tab-pane">
+            <div className="tab-pane" role="tabpanel" id="panel-legend" aria-labelledby="tab-legend" tabIndex={-1}>
               {!result ? (
                 <p className="empty-hint">Run a prediction first to see the hazard legend.</p>
               ) : (
@@ -725,7 +751,7 @@ export default function App() {
 
           {/* ── BARANGAY SUMMARY ────────────────────────────────────────── */}
           {activeTab === "summary" && (
-            <div className="tab-pane">
+            <div className="tab-pane" role="tabpanel" id="panel-summary" aria-labelledby="tab-summary" tabIndex={-1}>
               {!result ? (
                 <p className="empty-hint">Run a prediction first to see the barangay hazard summary.</p>
               ) : barangaySummary.length === 0 ? (
@@ -773,12 +799,24 @@ export default function App() {
                           .map((b) => (
                             <tr key={b.name}
                               className={highlightedName === b.name ? "active" : ""}
+                              tabIndex={0}
+                              role="button"
+                              aria-label={`${b.name}, dominant hazard ${HAZARD_NAMES[b.dominant]}, `
+                                + `${b.classified_pct}% of its area hazard-classified. `
+                                + `Select to show this barangay in the legend.`}
                               onClick={() => handleBarangayClick(b.name)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  handleBarangayClick(b.name);
+                                }
+                              }}
                               style={{ cursor: "pointer" }}>
                               <td className="brgy-summary-name">{b.name}</td>
                               <td>
                                 <span className="brgy-hazard-badge"
-                                  style={{ background: HAZARD_COLORS[b.dominant] }}>
+                                  style={{ background: HAZARD_COLORS[b.dominant],
+                                           color: HAZARD_ON_COLOR[b.dominant] }}>
                                   {HAZARD_NAMES[b.dominant] ?? "—"}
                                 </span>
                               </td>
@@ -786,10 +824,10 @@ export default function App() {
                               {[0,1,2,3,4,5].map((c) => (
                                 <td key={c} className="brgy-summary-count">
                                   {parseFloat(b.pcts?.[c] || 0) > 0
-                                    ? <span style={{ color: HAZARD_COLORS[c], fontWeight: 600 }}>
+                                    ? <span style={{ fontWeight: c === b.dominant ? 700 : 500 }}>
                                         {b.pcts[c]}%
                                       </span>
-                                    : <span style={{ opacity: 0.25 }}>—</span>
+                                    : <span className="muted" aria-label="none">—</span>
                                   }
                                 </td>
                               ))}
@@ -817,7 +855,7 @@ export default function App() {
 
           {/* ── HISTORY ─────────────────────────────────────────────────── */}
           {activeTab === "history" && (
-            <div className="tab-pane">
+            <div className="tab-pane" role="tabpanel" id="panel-history" aria-labelledby="tab-history" tabIndex={-1}>
               <div className="history-header">
                 <h3>Past Scenarios</h3>
                 <button className="refresh-btn" onClick={fetchHistory}>↻ Refresh</button>
@@ -833,7 +871,7 @@ export default function App() {
 
           {/* ── DOWNLOADS / EXPORT ──────────────────────────────────────── */}
           {activeTab === "downloads" && (
-            <div className="tab-pane">
+            <div className="tab-pane" role="tabpanel" id="panel-downloads" aria-labelledby="tab-downloads" tabIndex={-1}>
               {!result ? (
                 <p className="empty-hint">Run a prediction to enable downloads.</p>
               ) : (
@@ -851,7 +889,7 @@ export default function App() {
 
           {/* ── ABOUT ───────────────────────────────────────────────────── */}
           {activeTab === "about" && (
-            <div className="tab-pane">
+            <div className="tab-pane" role="tabpanel" id="panel-about" aria-labelledby="tab-about" tabIndex={-1}>
 
               {/* System overview */}
               <div className="about-card">
@@ -1107,6 +1145,9 @@ export default function App() {
 
         <MapContainer center={[13.78, 123.0]} zoom={11} scrollWheelZoom
           className="leaflet-map">
+          {/* The raster conveys its content through colour alone, so the figures
+              are also published as text in the live region above and in the
+              barangay table, which is keyboard navigable. */}
           {bounds && <MapFitter bounds={bounds} />}
           {selectedBarangay && <BarangayFocuser feature={selectedBarangay} />}
 
@@ -1193,7 +1234,8 @@ export default function App() {
                   <div className="brgy-popup-dominant">
                     <span className="brgy-popup-dom-label">Dominant Hazard</span>
                     <span className="brgy-hazard-badge"
-                      style={{ background: HAZARD_COLORS[bData.dominant] }}>
+                      style={{ background: HAZARD_COLORS[bData.dominant],
+                               color: HAZARD_ON_COLOR[bData.dominant] }}>
                       {HAZARD_NAMES[bData.dominant]}
                     </span>
                   </div>

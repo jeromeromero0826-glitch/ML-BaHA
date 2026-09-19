@@ -29,7 +29,10 @@
   --danger:    #ef4444;
 
   /* Text */
-  --slate-500: #64748b;
+  /* Lightened from #64748b, which gave 4.11:1 on the tab bar and failed WCAG
+     AA. This value clears 4.5:1 on every surface it is used on: 5.28 on
+     navy-950, 4.94 on navy-900, 4.50 on navy-800. */
+  --slate-500: #76869d;
   --slate-400: #94a3b8;
   --slate-300: #cbd5e1;
   --slate-200: #e2e8f0;
@@ -435,6 +438,24 @@ body {
 .brgy-selected-clear { margin-left: auto; background: none; border: none; color: var(--slate-400); font-size: 16px; cursor: pointer; padding: 4px; line-height: 1; flex-shrink: 0; }
 .brgy-selected-clear:hover { color: var(--white); }
 
+/* WCAG 2.4.7 Focus Visible. The app previously had no focus indicator at all
+   beyond two inputs, so a keyboard user had no way to tell where they were.
+   :focus-visible keeps it off for mouse clicks. */
+:focus-visible {
+  outline: 3px solid var(--cyan-400);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+.leaflet-container a:focus-visible,
+.leaflet-control a:focus-visible { outline-offset: 0; }
+
+/* Content for assistive technology only: present to a screen reader, not shown. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px;
+  padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    CRASH SCREEN (ErrorBoundary fallback)
    ═══════════════════════════════════════════════════════════════════════════ */
@@ -462,7 +483,7 @@ body {
   background: var(--navy-950); border: 1px solid var(--navy-700);
   border-radius: var(--radius-sm);
   font-family: var(--font-mono); font-size: 10.5px; line-height: 1.5;
-  color: var(--slate-500); white-space: pre-wrap; word-break: break-word;
+  color: var(--slate-400); white-space: pre-wrap; word-break: break-word;
   max-height: 160px; overflow: auto;
 }
 
@@ -512,7 +533,7 @@ body {
 }
 .legend-scope-back:hover  { background: var(--navy-700); border-color: var(--cyan-400); }
 .legend-scope-back:active { background: var(--navy-600); }
-.legend-scope-hint { margin: 7px 0 0; font-size: 10.5px; line-height: 1.5; color: var(--slate-500); }
+.legend-scope-hint { margin: 7px 0 0; font-size: 10.5px; line-height: 1.5; color: var(--slate-400); }
 .legend-depth-note {
   display: flex; flex-direction: column; gap: 2px;
   margin-top: 8px; margin-bottom: 12px; padding: 9px 11px;
@@ -521,7 +542,7 @@ body {
   font-size: 11px; color: var(--slate-400);
 }
 .legend-depth-note strong { color: var(--slate-200); font-family: var(--font-mono); }
-.legend-depth-channel { font-size: 10px; color: var(--slate-500); }
+.legend-depth-channel { font-size: 10px; color: var(--slate-400); }
 .map-legend-sub {
   font-size: 8.5px; font-family: var(--font-mono);
   color: var(--slate-400); margin: -3px 0 6px;
@@ -847,13 +868,20 @@ body {
 }
 .brgy-hazard-badge {
   display: inline-block; padding: 2px 6px; border-radius: 10px;
-  font-size: 9px; font-weight: 700; color: var(--white);
-  white-space: nowrap; text-shadow: 0 1px 2px rgba(0,0,0,0.4);
+  font-size: 9px; font-weight: 700;
+  /* Text colour is set per hazard class in App.jsx: white fails badly on the
+     lighter classes (1.53:1 on Low, 2.80:1 on Moderate). No text-shadow, since
+     it muddies dark text on the yellow and orange classes. */
+  white-space: nowrap;
 }
 .brgy-summary-mono { font-family: var(--font-mono); font-size: 10px; color: var(--slate-300); }
-.brgy-summary-count { font-family: var(--font-mono); font-size: 10px; white-space: nowrap; }
+/* Uniform, readable colour. These used to be tinted by hazard class, which put
+   Extreme at 2.01:1 on this background and leaned on colour alone to say which
+   class a number belonged to. The column header already says that. */
+.brgy-summary-count { font-family: var(--font-mono); font-size: 10px; white-space: nowrap; color: var(--slate-200); }
+.brgy-summary-count .muted { color: var(--slate-500); }
 .summary-legend-hint {
-  font-size: 9.5px; color: var(--slate-500);
+  font-size: 9.5px; color: var(--slate-400);
   text-align: center; padding: 6px 0 2px; line-height: 1.7;
 }
 
