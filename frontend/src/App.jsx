@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   MapContainer, TileLayer, ImageOverlay,
   LayersControl, ScaleControl, GeoJSON, useMap,
@@ -183,6 +183,43 @@ function MapFitter({ bounds }) {
   return null;
 }
 
+// Leaflet bounds for a whole FeatureCollection, [[south, west], [north, east]].
+// Used as the municipality's own extent, which is tighter than the prediction
+// raster's bounding box and is known before any prediction has been run.
+function geoJsonBounds(geojson) {
+  let s = Infinity, w = Infinity, n = -Infinity, e = -Infinity;
+  const visit = (c) => {
+    if (typeof c[0] === "number") {
+      const [lng, lat] = c;
+      if (lat < s) s = lat;
+      if (lat > n) n = lat;
+      if (lng < w) w = lng;
+      if (lng > e) e = lng;
+    } else {
+      for (const part of c) visit(part);
+    }
+  };
+  for (const f of geojson?.features ?? []) {
+    if (f?.geometry?.coordinates) visit(f.geometry.coordinates);
+  }
+  return Number.isFinite(s) ? [[s, w], [n, e]] : null;
+}
+
+// Leaving the barangay view used to reset the legend but not the map, so the
+// panel read "Sipocot" over a map still zoomed into one barangay. Driven by a
+// counter rather than by the selection going null, so that dismissing a
+// selection some other way does not move the map on its own.
+function MapHomeView({ bounds, token }) {
+  const map = useMap();
+  const lastToken = useRef(token);
+  useEffect(() => {
+    if (token === lastToken.current) return;   // mount, not a reset
+    lastToken.current = token;
+    if (bounds) map.fitBounds(bounds, { padding: [24, 24] });
+  }, [token, bounds, map]);
+  return null;
+}
+
 function BarangayFocuser({ feature }) {
   const map = useMap();
   useEffect(() => {
@@ -322,6 +359,7 @@ export default function App() {
   const [barangayList,     setBarangayList]     = useState([]);
   const [barangaySearch,   setBarangaySearch]   = useState("");
   const [selectedBarangay, setSelectedBarangay] = useState(null);
+  const [viewReset,        setViewReset]        = useState(0);   // bumped to refit the map on Sipocot
   const [highlightedName,  setHighlightedName]  = useState("");
   const [summarySearch,    setSummarySearch]    = useState("");
   const [barangayPopup,    setBarangayPopup]    = useState(null); // { name, x, y }
@@ -336,6 +374,12 @@ export default function App() {
   const overlayUrl = mapOutputs?.hazard_png ? `${API_BASE_URL}${mapOutputs.hazard_png}` : null;
   const bounds     = mapOutputs?.bounds || null;
   const extrapolation = result?.extrapolation ?? [];
+
+  // Where "all of Sipocot" means on the map. The municipal boundary frames the
+  // town better than the prediction raster, whose rectangle reaches well past
+  // it; the overlay extent is the fallback before boundaries have loaded.
+  const municipalBounds = useMemo(() => geoJsonBounds(barangayGeoJSON), [barangayGeoJSON]);
+  const homeBounds = municipalBounds || bounds;
 
   const outputUrls = {
     depthRaster:   result?.outputs?.depth_raster   ? `${API_BASE_URL}${result.outputs.depth_raster}`   : null,
@@ -568,7 +612,11 @@ export default function App() {
       }))
     : [];
 
-  const clearSelection = () => { setHighlightedName(""); setSelectedBarangay(null); };
+  const clearSelection = () => {
+    setHighlightedName("");
+    setSelectedBarangay(null);
+    setViewReset((v) => v + 1);   // and take the map back out with it
+  };
 
   const filteredBarangays = barangayList.filter((n) =>
     n.toLowerCase().includes(barangaySearch.toLowerCase())
@@ -1233,6 +1281,7 @@ export default function App() {
               barangay table, which is keyboard navigable. */}
           {bounds && <MapFitter bounds={bounds} />}
           {selectedBarangay && <BarangayFocuser feature={selectedBarangay} />}
+          <MapHomeView bounds={homeBounds} token={viewReset} />
 
           <LayersControl position="topright">
             <LayersControl.BaseLayer checked name="OpenStreetMap">
