@@ -533,7 +533,6 @@ body {
 }
 .legend-scope-back:hover  { background: var(--navy-700); border-color: var(--cyan-400); }
 .legend-scope-back:active { background: var(--navy-600); }
-.history-note { margin: 10px 0 0; font-size: 10px; line-height: 1.6; color: var(--slate-400); }
 .legend-scope-timing { margin: 6px 0 0; font-size: 10px; font-family: var(--font-mono); color: var(--cyan-300); }
 .legend-scope-hint { margin: 7px 0 0; font-size: 10.5px; line-height: 1.5; color: var(--slate-400); }
 .legend-depth-note {

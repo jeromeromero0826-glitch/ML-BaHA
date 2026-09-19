@@ -914,15 +914,9 @@ export default function App() {
               </div>
               {scenarios.length === 0
                 ? <p className="empty-hint">No scenarios yet. Run a prediction to start building history.</p>
-                : <>
-                    <div className="scenario-list">
-                      {scenarios.map((s) => <ScenarioRow key={s.id} s={s} onLoad={loadScenario} />)}
-                    </div>
-                    <p className="history-note">
-                      Kept in this browser only, so this list is yours. Loading one re-runs it,
-                      which is usually instant because results are cached on the server.
-                    </p>
-                  </>
+                : <div className="scenario-list">
+                    {scenarios.map((s) => <ScenarioRow key={s.id} s={s} onLoad={loadScenario} />)}
+                  </div>
               }
             </div>
           )}
